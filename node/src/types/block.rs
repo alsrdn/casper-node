@@ -1782,6 +1782,7 @@ impl FetchItem for BlockExecutionResultsOrChunk {
 
     fn validate(&self, metadata: &ExecutionResultsChecksum) -> Result<(), Self::ValidationError> {
         if let ValueOrChunk::ChunkWithProof(chunk_with_proof) = &self.value {
+            // TODO: should we also memoize this result in is_valid?
             chunk_with_proof.verify()?;
         }
         if let ExecutionResultsChecksum::Checkable(expected) = *metadata {

@@ -5,7 +5,7 @@ use derive_more::From;
 use either::Either;
 use serde::Serialize;
 
-use casper_execution_engine::core::engine_state;
+use casper_execution_engine::{core::engine_state, storage::trie::TrieRaw};
 
 use super::GlobalStateSynchronizerEvent;
 use crate::{
@@ -16,7 +16,7 @@ use crate::{
     effect::requests::BlockSynchronizerRequest,
     types::{
         ApprovalsHashes, Block, BlockExecutionResultsOrChunk, BlockHash, BlockHeader, Deploy,
-        FinalitySignature, FinalizedBlock, LegacyDeploy, NodeId,
+        FinalitySignature, FinalizedBlock, LegacyDeploy, NodeId, TrieOrChunk, TrieOrChunkId,
     },
 };
 
@@ -62,6 +62,16 @@ pub(crate) enum Event {
     ExecutionResultsFetched {
         block_hash: BlockHash,
         result: FetchResult<BlockExecutionResultsOrChunk>,
+    },
+    TrieOrChunkFetched {
+        trie_id: TrieOrChunkId,
+        result: FetchResult<TrieOrChunk>,
+    },
+    PutTrieResult {
+        trie_hash: Digest,
+        trie_raw: TrieRaw,
+        #[serde(skip)]
+        put_trie_result: Result<Digest, engine_state::Error>,
     },
     ExecutionResultsStored(BlockHash),
     AccumulatedPeers(BlockHash, Option<Vec<NodeId>>),
@@ -172,6 +182,16 @@ impl Display for Event {
             }
             Event::MarkBlockCompleted { .. } => {
                 write!(f, "mark block completed")
+            }
+            Event::TrieOrChunkFetched { trie_id, result: _ } => {
+                write!(f, "fetch response for trie {}", trie_id)
+            }
+            Event::PutTrieResult {
+                trie_hash,
+                trie_raw,
+                put_trie_result,
+            } => {
+                write!(f, "put trie result for trie {}", trie_hash)
             }
         }
     }

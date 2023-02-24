@@ -871,10 +871,17 @@ impl ContractRuntime {
     ) -> Result<Option<TrieOrChunk>, ContractRuntimeError> {
         let correlation_id = CorrelationId::new();
         let start = Instant::now();
-        let TrieOrChunkId(chunk_index, trie_key) = trie_or_chunk_id;
-        let ret = match engine_state.get_trie_full(correlation_id, trie_key)? {
+        let TrieOrChunkId {
+            chunk_index,
+            trie_hash,
+        } = trie_or_chunk_id;
+        let ret = match engine_state.get_trie_full(correlation_id, trie_hash)? {
             None => Ok(None),
-            Some(trie_raw) => Ok(Some(TrieOrChunk::new(trie_raw.into(), chunk_index)?)),
+            Some(trie_raw) => Ok(Some(TrieOrChunk::new(
+                trie_hash,
+                trie_raw.into(),
+                chunk_index,
+            )?)),
         };
         metrics.get_trie.observe(start.elapsed().as_secs_f64());
         ret
@@ -967,7 +974,7 @@ mod tests {
     }
 
     fn extract_next_hash_from_trie(trie_or_chunk: TrieOrChunk) -> Digest {
-        let next_hash = if let TrieOrChunk::Value(trie_bytes) = trie_or_chunk {
+        let next_hash = if let ValueOrChunk::Value(trie_bytes) = trie_or_chunk.into_value() {
             if let Trie::Node { pointer_block } = bytesrepr::deserialize::<Trie<Key, StoredValue>>(
                 trie_bytes.into_inner().into_inner().into(),
             )

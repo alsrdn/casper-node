@@ -1,10 +1,14 @@
+use casper_execution_engine::storage::trie::TrieRaw;
 use datasize::DataSize;
 use derive_more::Display;
 
 use casper_hashing::Digest;
 use casper_types::{EraId, PublicKey};
 
-use crate::types::{Block, BlockExecutionResultsOrChunkId, BlockHash, DeployHash, DeployId};
+use crate::types::{
+    Block, BlockExecutionResultsOrChunkId, BlockHash, DeployHash, DeployId, TrieOrChunk,
+    TrieOrChunkId,
+};
 
 use super::execution_results_acquisition::ExecutionResultsChecksum;
 
@@ -30,7 +34,12 @@ pub(crate) enum NeedNext {
     )]
     FinalitySignatures(BlockHash, EraId, Vec<PublicKey>),
     #[display(fmt = "need next for {}: global state (state root hash {})", _0, _1)]
-    GlobalState(BlockHash, Digest),
+    GlobalState(
+        BlockHash,
+        Digest,
+        Vec<(Digest, TrieRaw)>,
+        Vec<TrieOrChunkId>,
+    ),
     #[display(fmt = "need next for {}: deploy {}", _0, _1)]
     DeployByHash(BlockHash, DeployHash),
     #[display(fmt = "need next for {}: deploy {}", _0, _1)]

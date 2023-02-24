@@ -7,17 +7,19 @@ mod deploy_acquisition;
 mod error;
 mod event;
 mod execution_results_acquisition;
+mod global_state_acquisition;
 mod global_state_synchronizer;
 mod metrics;
 mod need_next;
 mod peer_list;
 mod signature_acquisition;
 mod trie_accumulator;
+mod trie_acquisition;
 
 #[cfg(test)]
 mod tests;
 
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 use datasize::DataSize;
 use either::Either;
@@ -28,7 +30,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, error, info, trace, warn};
 
-use casper_execution_engine::core::engine_state;
+use casper_execution_engine::{core::engine_state, storage::trie::TrieRaw};
 use casper_hashing::Digest;
 use casper_types::Timestamp;
 
@@ -54,7 +56,7 @@ use crate::{
     types::{
         ApprovalsHashes, Block, BlockExecutionResultsOrChunk, BlockHash, BlockHeader,
         BlockSignatures, Deploy, FinalitySignature, FinalitySignatureId, LegacyDeploy, MetaBlock,
-        MetaBlockState, NodeId, SyncLeap, TrieOrChunk, ValidatorMatrix,
+        MetaBlockState, NodeId, SyncLeap, TrieOrChunk, TrieOrChunkId, ValidatorMatrix,
     },
     NodeRng,
 };
@@ -489,6 +491,51 @@ impl BlockSynchronizer {
         effects
     }
 
+    fn trie_or_chunk_fetched(&self, trie_id: TrieOrChunkId, result: FetchResult<TrieOrChunk>) {
+        let (id, maybe_trie_or_chunk, maybe_peer) = match result {
+            Ok(FetchedData::FromPeer { item, peer }) => {
+                debug!(
+                    "BlockSynchronizer: fetched trie or chunk {} from peer {}",
+                    item, peer
+                );
+                (item.fetch_id(), Some(item), Some(peer))
+            }
+            Ok(FetchedData::FromStorage { item }) => (item.fetch_id(), Some(item), None),
+            Err(err) => {
+                debug!(%err, "BlockSynchronizer: failed to fetch trie or chunk");
+                if err.is_peer_fault() {
+                    (err.id().clone(), None, Some(*err.peer()))
+                } else {
+                    (err.id().clone(), None, None)
+                }
+            }
+        };
+
+        if let Some(builder) = &mut self.historical {
+            match maybe_trie_or_chunk {
+                None => {
+                    builder.demote_peer(maybe_peer);
+                }
+                Some(trie_or_chunk) => {
+                    if let Err(error) = builder.register_trie_or_chunk(*trie_or_chunk, maybe_peer) {
+                        warn!(%error, "BlockSynchronizer: failed to apply trie_or_chunk");
+                    }
+                }
+            }
+        }
+    }
+
+    fn put_trie_result(
+        &self,
+        trie_hash: Digest,
+        trie_raw: TrieRaw,
+        put_trie_result: Result<Digest, engine_state::Error>,
+    ) {
+        if let Some(builder) = &mut self.historical {
+            builder.register_put_trie(trie_hash, trie_raw, put_trie_result);
+        }
+    }
+
     fn dishonest_peers(&self) -> Vec<NodeId> {
         let mut ret = vec![];
         if let Some(builder) = &self.forward {
@@ -573,17 +620,39 @@ impl BlockSynchronizer {
                         );
                     }
                 }
-                NeedNext::GlobalState(block_hash, global_state_root_hash) => {
-                    builder.set_in_flight_latch();
-                    results.extend(
-                        effect_builder
-                            .sync_global_state(
-                                block_hash,
-                                global_state_root_hash,
-                                peers.into_iter().collect(),
-                            )
-                            .event(move |result| Event::GlobalStateSynced { block_hash, result }),
-                    );
+                NeedNext::GlobalState(
+                    block_hash,
+                    global_state_root_hash,
+                    tries_to_store,
+                    tries_to_fetch,
+                ) => {
+                    //TODO: latch magic! builder.set_in_flight_latch();
+                    let mut trie_fetches_in_progress: HashSet<Digest> = HashSet::new();
+                    for (trie_id, peer) in tries_to_fetch
+                        .into_iter()
+                        .take(self.config.max_parallel_trie_fetches() as usize)
+                        .zip(peers.into_iter().cycle())
+                    {
+                        trie_fetches_in_progress.push(trie_id.hash());
+                        results.extend(
+                            effect_builder
+                                .fetch::<TrieOrChunk>(trie_id, peer, EmptyValidationMetadata)
+                                .event(move |result| Event::TrieOrChunkFetched { trie_id, result }),
+                        );
+                    }
+                    builder.register_pending_trie_fetches(trie_fetches_in_progress);
+
+                    for (trie_hash, trie_raw) in tries_to_store {
+                        results.extend(
+                            effect_builder
+                                .put_trie_if_all_children_present(trie_raw.clone())
+                                .event(move |put_trie_result| Event::PutTrieResult {
+                                    trie_hash,
+                                    trie_raw,
+                                    put_trie_result,
+                                }),
+                        )
+                    }
                 }
                 NeedNext::ExecutionResultsChecksum(block_hash, global_state_root_hash) => {
                     builder.set_in_flight_latch();
@@ -1214,7 +1283,9 @@ impl<REv: ReactorEvent> Component<REv> for BlockSynchronizer {
                     | Event::ExecutionResultsStored(_)
                     | Event::AccumulatedPeers(_, _)
                     | Event::NetworkPeers(_, _)
-                    | Event::GlobalStateSynchronizer(_) => {
+                    | Event::GlobalStateSynchronizer(_)
+                    | Event::TrieOrChunkFetched { .. }
+                    | Event::PutTrieResult { .. } => {
                         warn!(
                             ?event,
                             name = <Self as Component<MainEvent>>::name(self),
@@ -1437,6 +1508,20 @@ impl<REv: ReactorEvent> Component<REv> for BlockSynchronizer {
                 // no more peers available, what do we need next?
                 Event::AccumulatedPeers(block_hash, None) => {
                     debug!(%block_hash, "BlockSynchronizer: got 0 peers from accumulator");
+                    self.need_next(effect_builder, rng)
+                }
+                Event::TrieOrChunkFetched { trie_id, result } => {
+                    debug!(%trie_id, "BlockSynchronizer: got a trie or chunk");
+                    self.trie_or_chunk_fetched(trie_id, result);
+                    self.need_next(effect_builder, rng)
+                }
+                Event::PutTrieResult {
+                    trie_hash,
+                    trie_raw,
+                    put_trie_result,
+                } => {
+                    debug!(%trie_hash, "BlockSynchronizer: got a response from the Contract Runtime for PutTrie");
+                    self.put_trie_result(trie_hash, trie_raw, put_trie_result);
                     self.need_next(effect_builder, rng)
                 }
             },

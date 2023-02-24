@@ -17,6 +17,8 @@ use crate::{
     NodeRng,
 };
 
+use super::global_state_acquisition::GlobalStateAcquisition;
+
 #[derive(Debug)]
 pub(crate) struct BlockAcquisitionAction {
     peers_to_ask: Vec<NodeId>,
@@ -120,11 +122,14 @@ impl BlockAcquisitionAction {
         rng: &mut NodeRng,
         block_hash: BlockHash,
         root_hash: Digest,
+        global_state_acquisition: &mut GlobalStateAcquisition,
     ) -> Self {
         let peers_to_ask = peer_list.qualified_peers(rng);
+        let tries_to_store = global_state_acquisition.tries_to_store();
+        let tries_to_fetch = global_state_acquisition.tries_to_fetch();
         BlockAcquisitionAction {
             peers_to_ask,
-            need_next: NeedNext::GlobalState(block_hash, root_hash),
+            need_next: NeedNext::GlobalState(block_hash, root_hash, tries_to_store, tries_to_fetch),
         }
     }
 

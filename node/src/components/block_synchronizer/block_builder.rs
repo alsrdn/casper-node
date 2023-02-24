@@ -2,7 +2,7 @@
 mod tests;
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fmt::{Display, Formatter},
     time::Instant,
 };
@@ -25,7 +25,7 @@ use crate::{
     types::{
         ApprovalsHashes, Block, BlockExecutionResultsOrChunk, BlockHash, BlockHeader,
         BlockSignatures, DeployHash, DeployId, EraValidatorWeights, FinalitySignature, NodeId,
-        ValidatorMatrix,
+        TrieOrChunk, ValidatorMatrix,
     },
     NodeRng,
 };
@@ -573,6 +573,25 @@ impl BlockBuilder {
         }
         self.touch();
         Ok(())
+    }
+
+    pub(super) fn register_pending_trie_fetches(
+        &mut self,
+        trie_fetches_in_progress: HashSet<Digest>,
+    ) {
+        self.acquisition_state
+            .register_pending_trie_fetches(trie_fetches_in_progress);
+    }
+
+    pub(super) fn register_trie_or_chunk(
+        &mut self,
+        trie_or_chunk: TrieOrChunk,
+        maybe_peer: Option<NodeId>,
+    ) -> Result<(), Error> {
+        let acceptance = self
+            .acquisition_state
+            .register_trie_or_chunk(trie_or_chunk, self.should_fetch_execution_state);
+        self.handle_acceptance(maybe_peer, acceptance)
     }
 
     pub(super) fn register_deploy(

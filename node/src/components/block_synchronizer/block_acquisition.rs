@@ -18,10 +18,12 @@ use crate::{
     },
     types::{
         ApprovalsHashes, Block, BlockExecutionResultsOrChunk, BlockHash, BlockHeader, DeployHash,
-        DeployId, EraValidatorWeights, FinalitySignature, SignatureWeight,
+        DeployId, EraValidatorWeights, FinalitySignature, SignatureWeight, TrieOrChunk,
     },
     NodeRng,
 };
+
+use super::global_state_acquisition::GlobalStateAcquisition;
 
 // BlockAcquisitionState is a milestone oriented state machine; it is always in a resting state
 // indicating the last completed step, while attempting to acquire the necessary data to transition
@@ -87,7 +89,12 @@ pub(super) enum BlockAcquisitionState {
     Initialized(BlockHash, SignatureAcquisition),
     HaveBlockHeader(Box<BlockHeader>, SignatureAcquisition),
     HaveWeakFinalitySignatures(Box<BlockHeader>, SignatureAcquisition),
-    HaveBlock(Box<Block>, SignatureAcquisition, DeployAcquisition),
+    HaveBlock(
+        Box<Block>,
+        SignatureAcquisition,
+        DeployAcquisition,
+        Option<GlobalStateAcquisition>,
+    ),
     HaveGlobalState(
         Box<Block>,
         SignatureAcquisition,
@@ -124,7 +131,7 @@ impl Display for BlockAcquisitionState {
                 block_header.height(),
                 block_header.block_hash()
             ),
-            BlockAcquisitionState::HaveBlock(block, _, _) => write!(
+            BlockAcquisitionState::HaveBlock(block, _, _, _) => write!(
                 f,
                 "have block body({}) for: {}",
                 block.header().height(),
@@ -176,7 +183,7 @@ impl BlockAcquisitionState {
             | BlockAcquisitionState::HaveWeakFinalitySignatures(block_header, _) => {
                 block_header.block_hash()
             }
-            BlockAcquisitionState::HaveBlock(block, _, _)
+            BlockAcquisitionState::HaveBlock(block, _, _, _)
             | BlockAcquisitionState::HaveGlobalState(block, _, _, _)
             | BlockAcquisitionState::HaveAllExecutionResults(block, _, _, _)
             | BlockAcquisitionState::HaveApprovalsHashes(block, _, _)
@@ -193,7 +200,7 @@ impl BlockAcquisitionState {
             | BlockAcquisitionState::HaveWeakFinalitySignatures(..) => None,
             BlockAcquisitionState::HaveAllDeploys(block, _)
             | BlockAcquisitionState::HaveStrictFinalitySignatures(block, _)
-            | BlockAcquisitionState::HaveBlock(block, _, _)
+            | BlockAcquisitionState::HaveBlock(block, _, _, _)
             | BlockAcquisitionState::HaveGlobalState(block, _, _, _)
             | BlockAcquisitionState::HaveAllExecutionResults(block, _, _, _)
             | BlockAcquisitionState::HaveApprovalsHashes(block, _, _) => Some(block.clone()),
@@ -307,13 +314,19 @@ impl BlockAcquisitionState {
             BlockAcquisitionState::HaveWeakFinalitySignatures(header, _) => Ok(
                 BlockAcquisitionAction::block_body(peer_list, rng, header.block_hash()),
             ),
-            BlockAcquisitionState::HaveBlock(block, signatures, deploys) => {
-                if is_historical {
+            BlockAcquisitionState::HaveBlock(
+                block,
+                signatures,
+                deploys,
+                global_state_acquisition,
+            ) => {
+                if let Some(global_state_acquisition) = global_state_acquisition {
                     Ok(BlockAcquisitionAction::global_state(
                         peer_list,
                         rng,
                         *block.hash(),
                         *block.state_root_hash(),
+                        global_state_acquisition,
                     ))
                 } else if deploys.needs_deploy().is_some() {
                     Ok(BlockAcquisitionAction::approvals_hashes(
@@ -414,13 +427,42 @@ impl BlockAcquisitionState {
         ret
     }
 
+    pub(super) fn register_pending_trie_fetches(
+        &mut self,
+        trie_fetches_in_progress: HashSet<Digest>,
+    ) {
+        match self {
+            BlockAcquisitionState::HaveBlock(_, _, _, Some(global_state_acq)) => {
+                global_state_acq.register_pending_trie_fetches(trie_fetches_in_progress);
+            }
+            BlockAcquisitionState::HaveBlock(_, _, _, None)
+            | BlockAcquisitionState::Initialized(_, _)
+            | BlockAcquisitionState::HaveBlockHeader(_, _)
+            | BlockAcquisitionState::HaveWeakFinalitySignatures(_, _)
+            | BlockAcquisitionState::HaveGlobalState(_, _, _, _)
+            | BlockAcquisitionState::HaveAllExecutionResults(_, _, _, _)
+            | BlockAcquisitionState::HaveApprovalsHashes(_, _, _)
+            | BlockAcquisitionState::HaveAllDeploys(_, _)
+            | BlockAcquisitionState::HaveStrictFinalitySignatures(_, _)
+            | BlockAcquisitionState::Failed(_, _) => {}
+        }
+    }
+
+    // TODO move this down in the file where it would naturally be called
+    pub(super) fn register_trie_or_chunk(
+        &mut self,
+        trie_or_chunk: TrieOrChunk,
+        is_historical: bool,
+    ) -> Result<Option<Acceptance>, BlockAcquisitionError> {
+    }
+
     /// The block height of the current block, if available.
     pub(super) fn block_height(&self) -> Option<u64> {
         match self {
             BlockAcquisitionState::Initialized(..) | BlockAcquisitionState::Failed(..) => None,
             BlockAcquisitionState::HaveBlockHeader(header, _)
             | BlockAcquisitionState::HaveWeakFinalitySignatures(header, _) => Some(header.height()),
-            BlockAcquisitionState::HaveBlock(block, _, _)
+            BlockAcquisitionState::HaveBlock(block, _, _, _)
             | BlockAcquisitionState::HaveGlobalState(block, ..)
             | BlockAcquisitionState::HaveAllExecutionResults(block, _, _, _)
             | BlockAcquisitionState::HaveApprovalsHashes(block, _, _)
@@ -490,10 +532,13 @@ impl BlockAcquisitionState {
                 let deploy_acquisition =
                     DeployAcquisition::new_by_hash(deploy_hashes, need_execution_state);
 
+                let global_state_acq =
+                    need_execution_state.then(GlobalStateAcquisition::new(block.state_root_hash()));
                 BlockAcquisitionState::HaveBlock(
                     Box::new(block.clone()),
                     signatures.clone(),
                     deploy_acquisition,
+                    global_state_acq,
                 )
             }
             BlockAcquisitionState::Initialized(..)
@@ -568,7 +613,7 @@ impl BlockAcquisitionState {
                     }
                 }
             }
-            BlockAcquisitionState::HaveBlock(block, acquired_signatures, acquired_deploys) => {
+            BlockAcquisitionState::HaveBlock(block, acquired_signatures, acquired_deploys, _) => {
                 maybe_block_hash = Some(*block.hash());
                 currently_acquiring_sigs = !is_historical
                     && acquired_deploys.needs_deploy().is_none()
@@ -658,7 +703,7 @@ impl BlockAcquisitionState {
         need_execution_state: bool,
     ) -> Result<Option<Acceptance>, BlockAcquisitionError> {
         let new_state = match self {
-            BlockAcquisitionState::HaveBlock(block, signatures, acquired)
+            BlockAcquisitionState::HaveBlock(block, signatures, acquired, _)
                 if !need_execution_state =>
             {
                 info!(
@@ -713,7 +758,7 @@ impl BlockAcquisitionState {
         need_execution_state: bool,
     ) -> Result<(), BlockAcquisitionError> {
         let new_state = match self {
-            BlockAcquisitionState::HaveBlock(block, signatures, deploys)
+            BlockAcquisitionState::HaveBlock(block, signatures, deploys, _)
                 if need_execution_state =>
             {
                 info!(
@@ -922,7 +967,7 @@ impl BlockAcquisitionState {
         is_historical: bool,
     ) -> Result<Option<Acceptance>, BlockAcquisitionError> {
         let (block, signatures, deploys) = match self {
-            BlockAcquisitionState::HaveBlock(block, signatures, deploys)
+            BlockAcquisitionState::HaveBlock(block, signatures, deploys, _)
                 if false == is_historical =>
             {
                 (block, signatures, deploys)
@@ -944,7 +989,7 @@ impl BlockAcquisitionState {
             BlockAcquisitionState::Initialized(_, _)
             | BlockAcquisitionState::HaveBlockHeader(_, _)
             | BlockAcquisitionState::HaveWeakFinalitySignatures(_, _)
-            | BlockAcquisitionState::HaveBlock(_, _, _)
+            | BlockAcquisitionState::HaveBlock(_, _, _, _)
             | BlockAcquisitionState::HaveGlobalState(_, _, _, _)
             | BlockAcquisitionState::HaveAllExecutionResults(_, _, _, _)
             | BlockAcquisitionState::HaveAllDeploys(_, _)
@@ -974,7 +1019,7 @@ impl BlockAcquisitionState {
         need_execution_state: bool,
     ) -> Result<(), BlockAcquisitionError> {
         let new_state = match self {
-            BlockAcquisitionState::HaveBlock(block, acquired_signatures, deploy_acquisition)
+            BlockAcquisitionState::HaveBlock(block, acquired_signatures, deploy_acquisition, _)
                 if !need_execution_state =>
             {
                 info!(
@@ -1024,7 +1069,7 @@ impl BlockAcquisitionState {
         need_execution_state: bool,
     ) -> Result<(), BlockAcquisitionError> {
         let new_state = match self {
-            BlockAcquisitionState::HaveBlock(block, acquired_signatures, deploy_acquisition)
+            BlockAcquisitionState::HaveBlock(block, acquired_signatures, deploy_acquisition, _)
                 if !need_execution_state =>
             {
                 info!(

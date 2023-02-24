@@ -29,6 +29,7 @@ pub(crate) enum BlockAcquisitionError {
     InvalidAttemptToMarkComplete,
     InvalidAttemptToEnqueueBlockForExecution,
     ExecutionResults(super::execution_results_acquisition::Error),
+    TrieAcquisition(super::trie_acquisition::Error),
 }
 
 impl Display for BlockAcquisitionError {
@@ -69,6 +70,9 @@ impl Display for BlockAcquisitionError {
             }
             BlockAcquisitionError::InvalidAttemptToApplyDeploy { deploy_id } => {
                 write!(f, "invalid attempt to apply deploy: {}", deploy_id)
+            }
+            BlockAcquisitionError::TrieAcquisition(error) => {
+                write!(f, "invalid attempt to trie: {}", error)
             }
         }
     }
