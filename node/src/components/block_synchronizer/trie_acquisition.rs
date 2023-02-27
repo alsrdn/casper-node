@@ -217,7 +217,7 @@ impl TrieAcquisition {
         }
     }
 
-    fn trie_hash(&self) -> Digest {
+    pub(super) fn trie_hash(&self) -> Digest {
         match self {
             TrieAcquisition::Needed { trie_hash }
             | TrieAcquisition::Acquiring { trie_hash, .. }

@@ -3,6 +3,7 @@ use std::{
     fmt::{self, Display, Formatter},
 };
 
+use casper_execution_engine::{core::engine_state, storage::trie::TrieRaw};
 use datasize::DataSize;
 use derive_more::Display;
 use tracing::{debug, error, info, trace, warn};
@@ -454,6 +455,47 @@ impl BlockAcquisitionState {
         trie_or_chunk: TrieOrChunk,
         is_historical: bool,
     ) -> Result<Option<Acceptance>, BlockAcquisitionError> {
+        match self {
+            BlockAcquisitionState::HaveBlock(_, _, _, Some(global_state_acq)) => {
+                match global_state_acq.register_trie_or_chunk(trie_or_chunk) {
+                    Ok(()) => Ok(Some(Acceptance::NeededIt)),
+                    Err(e) => Err(BlockAcquisitionError::GlobalStateAcquisition(e)),
+                }
+            }
+            BlockAcquisitionState::HaveBlock(_, _, _, None)
+            | BlockAcquisitionState::Initialized(_, _)
+            | BlockAcquisitionState::HaveBlockHeader(_, _)
+            | BlockAcquisitionState::HaveWeakFinalitySignatures(_, _)
+            | BlockAcquisitionState::HaveGlobalState(_, _, _, _)
+            | BlockAcquisitionState::HaveAllExecutionResults(_, _, _, _)
+            | BlockAcquisitionState::HaveApprovalsHashes(_, _, _)
+            | BlockAcquisitionState::HaveAllDeploys(_, _)
+            | BlockAcquisitionState::HaveStrictFinalitySignatures(_, _)
+            | BlockAcquisitionState::Failed(_, _) => Ok(None),
+        }
+    }
+
+    pub(super) fn register_put_trie(
+        &mut self,
+        trie_hash: Digest,
+        trie_raw: TrieRaw,
+        put_trie_result: Result<Digest, engine_state::Error>,
+    ) {
+        match self {
+            BlockAcquisitionState::HaveBlock(_, _, _, Some(global_state_acq)) => {
+                global_state_acq.register_put_trie(trie_hash, trie_raw, put_trie_result);
+            }
+            BlockAcquisitionState::HaveBlock(_, _, _, None)
+            | BlockAcquisitionState::Initialized(_, _)
+            | BlockAcquisitionState::HaveBlockHeader(_, _)
+            | BlockAcquisitionState::HaveWeakFinalitySignatures(_, _)
+            | BlockAcquisitionState::HaveGlobalState(_, _, _, _)
+            | BlockAcquisitionState::HaveAllExecutionResults(_, _, _, _)
+            | BlockAcquisitionState::HaveApprovalsHashes(_, _, _)
+            | BlockAcquisitionState::HaveAllDeploys(_, _)
+            | BlockAcquisitionState::HaveStrictFinalitySignatures(_, _)
+            | BlockAcquisitionState::Failed(_, _) => {}
+        }
     }
 
     /// The block height of the current block, if available.
@@ -532,8 +574,8 @@ impl BlockAcquisitionState {
                 let deploy_acquisition =
                     DeployAcquisition::new_by_hash(deploy_hashes, need_execution_state);
 
-                let global_state_acq =
-                    need_execution_state.then(GlobalStateAcquisition::new(block.state_root_hash()));
+                let global_state_acq = need_execution_state
+                    .then(|| GlobalStateAcquisition::new(block.state_root_hash()));
                 BlockAcquisitionState::HaveBlock(
                     Box::new(block.clone()),
                     signatures.clone(),

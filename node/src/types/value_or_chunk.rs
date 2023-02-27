@@ -136,7 +136,7 @@ impl Display for HashingTrieRaw {
 }
 
 impl HashingTrieRaw {
-    fn hash(&self) -> Digest {
+    pub(crate) fn hash(&self) -> Digest {
         *self.hash.get_or_init(|| Digest::hash(self.inner.inner()))
     }
 

@@ -7,10 +7,8 @@ use serde::Serialize;
 
 use casper_execution_engine::{core::engine_state, storage::trie::TrieRaw};
 
-use super::GlobalStateSynchronizerEvent;
 use crate::{
     components::{
-        block_synchronizer::{GlobalStateSynchronizerError, GlobalStateSynchronizerResponse},
         fetcher::FetchResult,
     },
     effect::requests::BlockSynchronizerRequest,
@@ -45,11 +43,6 @@ pub(crate) enum Event {
     ApprovalsHashesFetched(FetchResult<ApprovalsHashes>),
     #[from]
     FinalitySignatureFetched(FetchResult<FinalitySignature>),
-    GlobalStateSynced {
-        block_hash: BlockHash,
-        #[serde(skip_serializing)]
-        result: Result<GlobalStateSynchronizerResponse, GlobalStateSynchronizerError>,
-    },
     GotExecutionResultsChecksum {
         block_hash: BlockHash,
         #[serde(skip_serializing)]
@@ -76,8 +69,6 @@ pub(crate) enum Event {
     ExecutionResultsStored(BlockHash),
     AccumulatedPeers(BlockHash, Option<Vec<NodeId>>),
     NetworkPeers(BlockHash, Vec<NodeId>),
-    #[from]
-    GlobalStateSynchronizer(GlobalStateSynchronizerEvent),
 }
 
 impl Display for Event {
@@ -130,13 +121,6 @@ impl Display for Event {
             Event::FinalitySignatureFetched(Err(fetcher_error)) => {
                 write!(f, "{}", fetcher_error)
             }
-            Event::GlobalStateSynced {
-                block_hash: _,
-                result,
-            } => match result {
-                Ok(response) => write!(f, "synced global state under root {}", response.hash()),
-                Err(error) => write!(f, "failed to sync global state: {}", error),
-            },
             Event::GotExecutionResultsChecksum {
                 block_hash: _,
                 result,
@@ -162,9 +146,6 @@ impl Display for Event {
                 Err(fetcher_error) => write!(f, "{}", fetcher_error),
             },
             Event::ExecutionResultsStored { .. } => write!(f, "stored execution results"),
-            Event::GlobalStateSynchronizer(event) => {
-                write!(f, "{:?}", event)
-            }
             Event::NetworkPeers(..) => {
                 write!(f, "network peers")
             }

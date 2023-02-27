@@ -132,8 +132,7 @@ use casper_types::{
 use crate::{
     components::{
         block_synchronizer::{
-            BlockSynchronizerStatus, GlobalStateSynchronizerError, GlobalStateSynchronizerResponse,
-            TrieAccumulatorError, TrieAccumulatorResponse,
+            BlockSynchronizerStatus
         },
         consensus::{ClContext, EraDump, ProposedBlock, ValidatorChange},
         contract_runtime::{ContractRuntimeError, EraValidatorsRequest},
@@ -168,7 +167,7 @@ use requests::{
     BeginGossipRequest, BlockAccumulatorRequest, BlockCompleteConfirmationRequest,
     BlockSynchronizerRequest, BlockValidationRequest, ChainspecRawBytesRequest, ConsensusRequest,
     FetcherRequest, MakeBlockExecutableRequest, NetworkInfoRequest, NetworkRequest,
-    ReactorStatusRequest, StorageRequest, SyncGlobalStateRequest, TrieAccumulatorRequest,
+    ReactorStatusRequest, StorageRequest,
     UpgradeWatcherRequest,
 };
 
@@ -1360,28 +1359,6 @@ impl<REv> EffectBuilder<REv> {
         .await
     }
 
-    /// Synchronize global state under the given root hash.
-    pub(crate) async fn sync_global_state(
-        self,
-        block_hash: BlockHash,
-        state_root_hash: Digest,
-        peers: HashSet<NodeId>,
-    ) -> Result<GlobalStateSynchronizerResponse, GlobalStateSynchronizerError>
-    where
-        REv: From<SyncGlobalStateRequest>,
-    {
-        self.make_request(
-            |responder| SyncGlobalStateRequest {
-                block_hash,
-                state_root_hash,
-                peers,
-                responder,
-            },
-            QueueKind::SyncGlobalState,
-        )
-        .await
-    }
-
     /// Get a trie or chunk by its ID.
     pub(crate) async fn get_trie(
         self,
@@ -1686,25 +1663,6 @@ impl<REv> EffectBuilder<REv> {
                 responder,
             },
             QueueKind::Fetch,
-        )
-        .await
-    }
-
-    pub(crate) async fn fetch_trie(
-        self,
-        hash: Digest,
-        peers: Vec<NodeId>,
-    ) -> Result<TrieAccumulatorResponse, TrieAccumulatorError>
-    where
-        REv: From<TrieAccumulatorRequest>,
-    {
-        self.make_request(
-            |responder| TrieAccumulatorRequest {
-                hash,
-                peers,
-                responder,
-            },
-            QueueKind::SyncGlobalState,
         )
         .await
     }

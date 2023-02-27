@@ -34,8 +34,7 @@ use casper_types::{
 use crate::{
     components::{
         block_synchronizer::{
-            BlockSynchronizerStatus, GlobalStateSynchronizerError, GlobalStateSynchronizerResponse,
-            TrieAccumulatorError, TrieAccumulatorResponse,
+            BlockSynchronizerStatus,
         },
         consensus::{ClContext, ProposedBlock, ValidatorChange},
         contract_runtime::EraValidatorsRequest,
@@ -1032,44 +1031,6 @@ pub(crate) struct FetcherRequest<T: FetchItem> {
 impl<T: FetchItem> Display for FetcherRequest<T> {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         write!(formatter, "request item by id {}", self.id)
-    }
-}
-
-/// TrieAccumulator related requests.
-#[derive(Debug, Serialize, DataSize)]
-#[must_use]
-pub(crate) struct TrieAccumulatorRequest {
-    /// The hash of the trie node.
-    pub(crate) hash: Digest,
-    /// The peers to try to fetch from.
-    pub(crate) peers: Vec<NodeId>,
-    /// Responder to call with the result.
-    pub(crate) responder: Responder<Result<TrieAccumulatorResponse, TrieAccumulatorError>>,
-}
-
-impl Display for TrieAccumulatorRequest {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
-        write!(formatter, "request trie by hash {}", self.hash)
-    }
-}
-
-#[derive(Debug, Serialize)]
-pub(crate) struct SyncGlobalStateRequest {
-    pub(crate) block_hash: BlockHash,
-    pub(crate) state_root_hash: Digest,
-    pub(crate) peers: HashSet<NodeId>,
-    #[serde(skip)]
-    pub(crate) responder:
-        Responder<Result<GlobalStateSynchronizerResponse, GlobalStateSynchronizerError>>,
-}
-
-impl Display for SyncGlobalStateRequest {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
-        write!(
-            formatter,
-            "request to sync global state at {}",
-            self.block_hash
-        )
     }
 }
 

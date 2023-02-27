@@ -78,8 +78,8 @@ impl TrieOrChunk {
         let value = ValueOrChunk::<HashingTrieRaw>::new(trie_raw, chunk_index)?;
         // TODO: revisit this
         let is_valid = match value {
-            ValueOrChunk::Value(trie_raw) => Ok(true),
-            ValueOrChunk::ChunkWithProof(chunk_with_proof) => match chunk_with_proof.verify() {
+            ValueOrChunk::Value(_) => Ok(true),
+            ValueOrChunk::ChunkWithProof(ref chunk_with_proof) => match chunk_with_proof.verify() {
                 Ok(()) => Ok(true),
                 Err(_) => Ok(false),
             },
@@ -129,8 +129,8 @@ impl FetchItem for TrieOrChunk {
 
     fn fetch_id(&self) -> Self::Id {
         match self.value {
-            ValueOrChunk::Value(trie_raw) => TrieOrChunkId::new(0, trie_raw.hash()),
-            ValueOrChunk::ChunkWithProof(chunked_data) => TrieOrChunkId::new(
+            ValueOrChunk::Value(ref trie_raw) => TrieOrChunkId::new(0, trie_raw.hash()),
+            ValueOrChunk::ChunkWithProof(ref chunked_data) => TrieOrChunkId::new(
                 chunked_data.proof().index(),
                 chunked_data.proof().root_hash(),
             ),
@@ -143,16 +143,19 @@ impl FetchItem for TrieOrChunk {
                 self.is_valid.get_or_init(|| Ok(true));
                 Ok(())
             }
-            ValueOrChunk::ChunkWithProof(chunk_with_proof) => self
-                .is_valid
-                .get_or_init(|| {
-                    match chunk_with_proof.verify() {
+            ValueOrChunk::ChunkWithProof(ref chunk_with_proof) => {
+                match self
+                    .is_valid
+                    .get_or_init(|| match chunk_with_proof.verify() {
                         Ok(()) => Ok(true),
-                        Err(_) => Ok(false),
-                    }
-                    .into()
-                })
-                .clone(),
+                        Err(e) => Err(e),
+                    }) {
+                    // TODO: fix this
+                    Ok(true) => Ok(()),
+                    Ok(false) => Err(ChunkWithProofVerificationError::UnexpectedRootHash),
+                    Err(e) => Err(e.clone()),
+                }
+            }
         }
     }
 }

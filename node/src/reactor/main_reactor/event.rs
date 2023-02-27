@@ -8,7 +8,7 @@ use casper_types::{system::auction::EraValidators, EraId};
 use crate::{
     components::{
         block_accumulator,
-        block_synchronizer::{self, GlobalStateSynchronizerEvent, TrieAccumulatorEvent},
+        block_synchronizer::{self},
         block_validator, consensus, contract_runtime, deploy_acceptor, deploy_buffer,
         diagnostics_port, event_stream_server, fetcher, gossiper,
         network::{self, GossipedAddress},
@@ -35,7 +35,7 @@ use crate::{
             ConsensusRequest, ContractRuntimeRequest, DeployBufferRequest, FetcherRequest,
             MakeBlockExecutableRequest, MetricsRequest, NetworkInfoRequest, NetworkRequest,
             ReactorStatusRequest, RestRequest, RpcRequest, SetNodeStopRequest, StorageRequest,
-            SyncGlobalStateRequest, TrieAccumulatorRequest, UpgradeWatcherRequest,
+            UpgradeWatcherRequest,
         },
     },
     protocol::Message,
@@ -541,36 +541,6 @@ impl Display for MainEvent {
                 )
             }
         }
-    }
-}
-
-impl From<SyncGlobalStateRequest> for MainEvent {
-    fn from(request: SyncGlobalStateRequest) -> Self {
-        MainEvent::BlockSynchronizer(block_synchronizer::Event::GlobalStateSynchronizer(
-            request.into(),
-        ))
-    }
-}
-
-impl From<TrieAccumulatorRequest> for MainEvent {
-    fn from(request: TrieAccumulatorRequest) -> Self {
-        MainEvent::BlockSynchronizer(block_synchronizer::Event::GlobalStateSynchronizer(
-            block_synchronizer::GlobalStateSynchronizerEvent::TrieAccumulatorEvent(request.into()),
-        ))
-    }
-}
-
-impl From<GlobalStateSynchronizerEvent> for MainEvent {
-    fn from(event: GlobalStateSynchronizerEvent) -> Self {
-        MainEvent::BlockSynchronizer(event.into())
-    }
-}
-
-impl From<TrieAccumulatorEvent> for MainEvent {
-    fn from(event: TrieAccumulatorEvent) -> Self {
-        MainEvent::BlockSynchronizer(block_synchronizer::Event::GlobalStateSynchronizer(
-            event.into(),
-        ))
     }
 }
 

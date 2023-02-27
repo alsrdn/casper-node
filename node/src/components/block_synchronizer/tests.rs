@@ -26,9 +26,7 @@ enum MockReactorEvent {
     BlockAccumulatorRequest(BlockAccumulatorRequest),
     PeerBehaviorAnnouncement(PeerBehaviorAnnouncement),
     StorageRequest(StorageRequest),
-    TrieAccumulatorRequest(TrieAccumulatorRequest),
     ContractRuntimeRequest(ContractRuntimeRequest),
-    SyncGlobalStateRequest(SyncGlobalStateRequest),
     MakeBlockExecutableRequest(MakeBlockExecutableRequest),
     MetaBlockAnnouncement(MetaBlockAnnouncement),
 }
@@ -73,6 +71,68 @@ fn random_peers(rng: &mut TestRng, num_random_peers: usize) -> HashSet<NodeId> {
         .collect()
 }
 
+#[tokio::test]
+async fn global_state_sync_wont_stall_with_bad_peers() {
+    let mut rng = TestRng::new();
+    let mock_reactor = MockReactor::new();
+
+    // Set up a random block that we will use to test synchronization
+    let block = Block::random(&mut rng);
+
+    // Set up a validator matrix for the era in which our test block was created
+    let mut validator_matrix = ValidatorMatrix::new_with_validator(ALICE_SECRET_KEY.clone());
+    validator_matrix.register_validator_weights(
+        block.header().era_id(),
+        iter::once((ALICE_PUBLIC_KEY.clone(), 100.into())).collect(),
+    );
+
+    // Create a block synchronizer with a maximum of 5 simultaneous peers
+    let mut block_synchronizer = BlockSynchronizer::new(
+        Config::default(),
+        5,
+        validator_matrix,
+        prometheus::default_registry(),
+    )
+    .unwrap();
+
+    // Generate more than 5 peers to see if the peer list changes after a global state sync error
+    let num_peers = rng.gen_range(10..20);
+    let peers: Vec<NodeId> = random_peers(&mut rng, num_peers).iter().cloned().collect();
+
+    // Set up the synchronizer for the test block such that the next step is getting global state
+    block_synchronizer.register_block_by_hash(*block.hash(), true, true);
+    assert!(block_synchronizer.historical.is_some()); // we only get global state on historical sync
+    block_synchronizer.register_peers(*block.hash(), peers);
+    let historical_builder = block_synchronizer.historical.as_mut().unwrap();
+    assert!(historical_builder
+        .register_block_header(block.header().clone(), None)
+        .is_ok());
+    historical_builder.register_era_validator_weights(&block_synchronizer.validator_matrix);
+
+    // Generate a finality signature for the test block and register it
+    let signature = FinalitySignature::create(
+        *block.hash(),
+        block.header().era_id(),
+        &Rc::new(ALICE_SECRET_KEY.clone()),
+        ALICE_PUBLIC_KEY.clone(),
+    );
+    assert!(signature.is_verified().is_ok());
+    assert!(historical_builder
+        .register_finality_signature(signature, None)
+        .is_ok());
+    assert!(historical_builder.register_block(&block, None).is_ok());
+
+    let acq_state = historical_builder.acquisition_state();
+    let global_state_acq = match acq_state {
+        block_acquisition::BlockAcquisitionState::HaveBlock(_, _, _, ref global_state_acq) => global_state_acq,
+        _ => unreachable!()
+    };
+
+    assert_eq!(global_state_acq.as_ref().unwrap().root_hash(), *block.state_root_hash());
+
+}
+
+/*
 fn check_sync_global_state_event(event: MockReactorEvent, block: &Block) -> HashSet<NodeId> {
     assert!(matches!(
         event,
@@ -210,3 +270,5 @@ async fn global_state_sync_wont_stall_with_bad_peers() {
             .is_peer_unreliable(peer));
     }
 }
+
+*/

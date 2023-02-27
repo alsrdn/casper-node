@@ -8,12 +8,10 @@ mod error;
 mod event;
 mod execution_results_acquisition;
 mod global_state_acquisition;
-mod global_state_synchronizer;
 mod metrics;
 mod need_next;
 mod peer_list;
 mod signature_acquisition;
-mod trie_accumulator;
 mod trie_acquisition;
 
 #[cfg(test)]
@@ -47,7 +45,7 @@ use crate::{
         requests::{
             BlockAccumulatorRequest, BlockCompleteConfirmationRequest, BlockSynchronizerRequest,
             ContractRuntimeRequest, FetcherRequest, MakeBlockExecutableRequest, NetworkInfoRequest,
-            StorageRequest, SyncGlobalStateRequest, TrieAccumulatorRequest,
+            StorageRequest,
         },
         EffectBuilder, EffectExt, Effects,
     },
@@ -68,18 +66,8 @@ pub(crate) use error::BlockAcquisitionError;
 pub(crate) use event::Event;
 use execution_results_acquisition::ExecutionResultsAcquisition;
 pub(crate) use execution_results_acquisition::ExecutionResultsChecksum;
-use global_state_synchronizer::GlobalStateSynchronizer;
-pub(crate) use global_state_synchronizer::{
-    Error as GlobalStateSynchronizerError, Event as GlobalStateSynchronizerEvent,
-    Response as GlobalStateSynchronizerResponse,
-};
 use metrics::Metrics;
 pub(crate) use need_next::NeedNext;
-use trie_accumulator::TrieAccumulator;
-pub(crate) use trie_accumulator::{
-    Error as TrieAccumulatorError, Event as TrieAccumulatorEvent,
-    Response as TrieAccumulatorResponse,
-};
 
 static BLOCK_SYNCHRONIZER_STATUS: Lazy<BlockSynchronizerStatus> = Lazy::new(|| {
     BlockSynchronizerStatus::new(
@@ -121,9 +109,7 @@ pub(crate) trait ReactorEvent:
     + From<BlockAccumulatorRequest>
     + From<PeerBehaviorAnnouncement>
     + From<StorageRequest>
-    + From<TrieAccumulatorRequest>
     + From<ContractRuntimeRequest>
-    + From<SyncGlobalStateRequest>
     + From<BlockCompleteConfirmationRequest>
     + From<MakeBlockExecutableRequest>
     + From<MetaBlockAnnouncement>
@@ -145,9 +131,7 @@ impl<REv> ReactorEvent for REv where
         + From<BlockAccumulatorRequest>
         + From<PeerBehaviorAnnouncement>
         + From<StorageRequest>
-        + From<TrieAccumulatorRequest>
         + From<ContractRuntimeRequest>
-        + From<SyncGlobalStateRequest>
         + From<BlockCompleteConfirmationRequest>
         + From<MakeBlockExecutableRequest>
         + From<MetaBlockAnnouncement>
@@ -207,8 +191,6 @@ pub(crate) struct BlockSynchronizer {
     forward: Option<BlockBuilder>,
     // either sync-to-genesis or sync-leaped block (get global state and execution effects)
     historical: Option<BlockBuilder>,
-    // deals with global state acquisition for historical blocks
-    global_sync: GlobalStateSynchronizer,
     #[data_size(skip)]
     metrics: Metrics,
 }
@@ -227,7 +209,6 @@ impl BlockSynchronizer {
             validator_matrix,
             forward: None,
             historical: None,
-            global_sync: GlobalStateSynchronizer::new(config.max_parallel_trie_fetches() as usize),
             metrics: Metrics::new(registry)?,
         })
     }
@@ -289,6 +270,7 @@ impl BlockSynchronizer {
             requires_strict_finality,
             self.max_simultaneous_peers,
             self.config.peer_refresh_interval(),
+            self.config.max_parallel_trie_fetches() as usize,
         );
         if should_fetch_execution_state {
             self.historical.replace(builder);
@@ -491,7 +473,7 @@ impl BlockSynchronizer {
         effects
     }
 
-    fn trie_or_chunk_fetched(&self, trie_id: TrieOrChunkId, result: FetchResult<TrieOrChunk>) {
+    fn trie_or_chunk_fetched(&mut self, trie_id: TrieOrChunkId, result: FetchResult<TrieOrChunk>) {
         let (id, maybe_trie_or_chunk, maybe_peer) = match result {
             Ok(FetchedData::FromPeer { item, peer }) => {
                 debug!(
@@ -526,7 +508,7 @@ impl BlockSynchronizer {
     }
 
     fn put_trie_result(
-        &self,
+        &mut self,
         trie_hash: Digest,
         trie_raw: TrieRaw,
         put_trie_result: Result<Digest, engine_state::Error>,
@@ -630,10 +612,9 @@ impl BlockSynchronizer {
                     let mut trie_fetches_in_progress: HashSet<Digest> = HashSet::new();
                     for (trie_id, peer) in tries_to_fetch
                         .into_iter()
-                        .take(self.config.max_parallel_trie_fetches() as usize)
                         .zip(peers.into_iter().cycle())
                     {
-                        trie_fetches_in_progress.push(trie_id.hash());
+                        trie_fetches_in_progress.insert(*trie_id.digest());
                         results.extend(
                             effect_builder
                                 .fetch::<TrieOrChunk>(trie_id, peer, EmptyValidationMetadata)
@@ -967,50 +948,6 @@ impl BlockSynchronizer {
         }
     }
 
-    fn global_state_synced(
-        &mut self,
-        block_hash: BlockHash,
-        result: Result<GlobalStateSynchronizerResponse, GlobalStateSynchronizerError>,
-    ) {
-        let (maybe_root_hash, unreliable_peers) = match result {
-            Ok(response) => (Some(*response.hash()), response.unreliable_peers()),
-            Err(error) => {
-                debug!(%error, "BlockSynchronizer: failed to sync global state");
-                match error {
-                    GlobalStateSynchronizerError::TrieAccumulator(unreliable_peers)
-                    | GlobalStateSynchronizerError::PutTrie(_, unreliable_peers) => {
-                        (None, unreliable_peers)
-                    }
-                    GlobalStateSynchronizerError::NoPeersAvailable(_) => {
-                        // This should never happen. Before creating a sync request,
-                        // the block synchronizer will request another set of peers
-                        // (both random and from the accumulator).
-                        debug!(
-                            "BlockSynchronizer: global state sync request was issued with no peers"
-                        );
-                        (None, Vec::new())
-                    }
-                }
-            }
-        };
-
-        if let Some(builder) = &mut self.historical {
-            if builder.block_hash() != block_hash {
-                debug!(%block_hash, "BlockSynchronizer: not currently synchronizing block");
-            } else {
-                if let Some(root_hash) = maybe_root_hash {
-                    if let Err(error) = builder.register_global_state(root_hash) {
-                        error!(%block_hash, %error, "BlockSynchronizer: failed to apply global state");
-                    }
-                }
-                // Demote all the peers where we didn't find the required global state tries
-                for peer in unreliable_peers.iter() {
-                    builder.demote_peer(Some(*peer));
-                }
-            }
-        }
-    }
-
     fn got_execution_results_checksum(
         &mut self,
         block_hash: BlockHash,
@@ -1182,11 +1119,7 @@ impl BlockSynchronizer {
         BlockSynchronizerProgress::Syncing(
             builder.block_hash(),
             builder.block_height(),
-            builder.last_progress_time().max(
-                self.global_sync
-                    .last_progress()
-                    .unwrap_or_else(Timestamp::zero),
-            ),
+            builder.last_progress_time(),
         )
     }
 
@@ -1276,14 +1209,12 @@ impl<REv: ReactorEvent> Component<REv> for BlockSynchronizer {
                     | Event::BlockFetched(_)
                     | Event::ApprovalsHashesFetched(_)
                     | Event::FinalitySignatureFetched(_)
-                    | Event::GlobalStateSynced { .. }
                     | Event::GotExecutionResultsChecksum { .. }
                     | Event::DeployFetched { .. }
                     | Event::ExecutionResultsFetched { .. }
                     | Event::ExecutionResultsStored(_)
                     | Event::AccumulatedPeers(_, _)
                     | Event::NetworkPeers(_, _)
-                    | Event::GlobalStateSynchronizer(_)
                     | Event::TrieOrChunkFetched { .. }
                     | Event::PutTrieResult { .. } => {
                         warn!(
@@ -1345,6 +1276,7 @@ impl<REv: ReactorEvent> Component<REv> for BlockSynchronizer {
                     // and its parent in order to check whether the validators have been
                     // changed by the upgrade
                     BlockSynchronizerRequest::SyncGlobalStates(global_states, peers_to_ask) => {
+                        /*
                         global_states
                             .into_iter()
                             .flat_map(move |(block_hash, global_state_hash)| {
@@ -1365,16 +1297,11 @@ impl<REv: ReactorEvent> Component<REv> for BlockSynchronizer {
                                 }
                             })
                             .collect()
+                        */
+                    // TODO: functionality above needs to be replaced
+                    Effects::new()
                     }
                 },
-                // tunnel event to global state synchronizer
-                // global_state_sync is a black box; we do not hook need next here
-                // global_state_sync signals the historical sync builder at the end of its process,
-                // and need next is then re-hooked to get the rest of the block
-                Event::GlobalStateSynchronizer(event) => reactor::wrap_effects(
-                    Event::GlobalStateSynchronizer,
-                    self.global_sync.handle_event(effect_builder, rng, event),
-                ),
                 // when a peer is disconnected from for any reason, disqualify peer
                 Event::DisconnectFromPeer(node_id) => {
                     self.register_disconnected_peer(node_id);
@@ -1451,11 +1378,6 @@ impl<REv: ReactorEvent> Component<REv> for BlockSynchronizer {
                 // determine if a block is post-1.4
                 Event::GotExecutionResultsChecksum { block_hash, result } => {
                     self.got_execution_results_checksum(block_hash, result);
-                    self.need_next(effect_builder, rng)
-                }
-                // historical sync needs to know that global state has been sync'd
-                Event::GlobalStateSynced { block_hash, result } => {
-                    self.global_state_synced(block_hash, result);
                     self.need_next(effect_builder, rng)
                 }
                 // historical sync needs to know that execution results have been fetched

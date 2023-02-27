@@ -1047,21 +1047,21 @@ mod tests {
         let (contract_runtime, root_hash) = create_test_state(create_test_pairs_with_large_data());
 
         // Expect `Trie` with NodePointer when asking with a root hash.
-        let trie = read_trie(&contract_runtime, TrieOrChunkId(0, root_hash));
-        assert!(matches!(trie, ValueOrChunk::Value(_)));
+        let trie = read_trie(&contract_runtime, TrieOrChunkId::new(0, root_hash));
+        assert!(matches!(trie.clone().into_value(), ValueOrChunk::Value(_)));
 
         // Expect another `Trie` with two LeafPointers.
         let trie = read_trie(
             &contract_runtime,
-            TrieOrChunkId(0, extract_next_hash_from_trie(trie)),
+            TrieOrChunkId::new(0, extract_next_hash_from_trie(trie)),
         );
-        assert!(matches!(trie, TrieOrChunk::Value(_)));
+        assert!(matches!(trie.clone().into_value(), ValueOrChunk::Value(_)));
 
         // Now, the next hash will point to the actual leaf, which as we expect
         // contains large data, so we expect to get `ChunkWithProof`.
         let hash = extract_next_hash_from_trie(trie);
-        let chunk = match read_trie(&contract_runtime, TrieOrChunkId(0, hash)) {
-            TrieOrChunk::ChunkWithProof(chunk) => chunk,
+        let chunk = match read_trie(&contract_runtime, TrieOrChunkId::new(0, hash)).into_value() {
+            ValueOrChunk::ChunkWithProof(chunk) => chunk,
             other => panic!("expected ChunkWithProof, got {:?}", other),
         };
 
@@ -1071,15 +1071,16 @@ mod tests {
         let count = chunk.proof().count();
         let mut chunks = vec![chunk];
         for i in 1..count {
-            let chunk = match read_trie(&contract_runtime, TrieOrChunkId(i, hash)) {
-                TrieOrChunk::ChunkWithProof(chunk) => chunk,
+            let chunk = match read_trie(&contract_runtime, TrieOrChunkId::new(i, hash)).into_value()
+            {
+                ValueOrChunk::ChunkWithProof(chunk) => chunk,
                 other => panic!("expected ChunkWithProof, got {:?}", other),
             };
             chunks.push(chunk);
         }
 
         // there should be no chunk with index `count`
-        let serialized_id = bincode::serialize(&TrieOrChunkId(count, hash)).unwrap();
+        let serialized_id = bincode::serialize(&TrieOrChunkId::new(count, hash)).unwrap();
         assert!(matches!(
             contract_runtime.get_trie(&serialized_id),
             Err(ContractRuntimeError::ChunkingError(

@@ -7,6 +7,7 @@ use std::{
     time::Instant,
 };
 
+use casper_execution_engine::{core::engine_state, storage::trie::TrieRaw};
 use datasize::DataSize;
 use tracing::{debug, error, trace, warn};
 
@@ -109,6 +110,7 @@ impl BlockBuilder {
         requires_strict_finality: bool,
         max_simultaneous_peers: u32,
         peer_refresh_interval: TimeDiff,
+        max_parallel_trie_fetches: usize,
     ) -> Self {
         BlockBuilder {
             block_hash,
@@ -592,6 +594,16 @@ impl BlockBuilder {
             .acquisition_state
             .register_trie_or_chunk(trie_or_chunk, self.should_fetch_execution_state);
         self.handle_acceptance(maybe_peer, acceptance)
+    }
+
+    pub(super) fn register_put_trie(
+        &mut self,
+        trie_hash: Digest,
+        trie_raw: TrieRaw,
+        put_trie_result: Result<Digest, engine_state::Error>,
+    ) {
+        self.acquisition_state
+            .register_put_trie(trie_hash, trie_raw, put_trie_result);
     }
 
     pub(super) fn register_deploy(
