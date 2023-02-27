@@ -76,6 +76,7 @@ function _main()
     local VERBOSE=${3}
     local CHAINSPEC_PATH=${4}
     local CONFIG_PATH=${5}
+    local HARD_RESET=${6}
     local PATH_TO_STAGE
     local PROTOCOL_VERSION
     local COUNT_NODES
@@ -108,7 +109,8 @@ function _main()
                               "$(get_protocol_version_for_chainspec "$PROTOCOL_VERSION")" \
                               "$ACTIVATION_POINT" \
                               "$CHAINSPEC_PATH" \
-                              false
+                              false \
+                              "$HARD_RESET"
         setup_asset_node_configs "$COUNT_NODES" \
                                  "$PROTOCOL_VERSION" \
                                  "$CONFIG_PATH" \
@@ -133,6 +135,7 @@ unset STAGE_ID
 unset VERBOSE
 unset CHAINSPEC_PATH
 unset CONFIG_PATH
+unset HARD_RESET
 
 for ARGUMENT in "$@"
 do
@@ -145,6 +148,7 @@ do
         verbose) VERBOSE=${VALUE} ;;
         chainspec_path) CHAINSPEC_PATH=${VALUE} ;;
         config_path) CONFIG_PATH=${VALUE} ;;
+        hard_reset) HARD_RESET=${VALUE} ;;
         *)
     esac
 done
@@ -159,4 +163,5 @@ _main "${STAGE_ID:-1}" \
       $((ACTIVATION_POINT + NCTL_DEFAULT_ERA_ACTIVATION_OFFSET)) \
       "${VERBOSE:-true}" \
       "${CHAINSPEC_PATH}" \
-      "${CONFIG_PATH}"
+      "${CONFIG_PATH}" \
+      "${HARD_RESET}"

@@ -223,6 +223,7 @@ function setup_asset_binaries()
 #   Delay in seconds to apply to genesis timestamp.
 #   Path to chainspec template file.
 #   Flag indicating whether chainspec pertains to genesis.
+#   Value for the `hard_reset` chainspec config.
 #######################################
 function setup_asset_chainspec()
 {
@@ -233,6 +234,7 @@ function setup_asset_chainspec()
     local ACTIVATION_POINT=${3}
     local PATH_TO_CHAINSPEC_TEMPLATE=${4}
     local IS_GENESIS=${5}
+    local HARD_RESET=${6}
     local PATH_TO_CHAINSPEC
     local SCRIPT
 
@@ -262,6 +264,10 @@ function setup_asset_chainspec()
     if [[ "$PATH_TO_CHAINSPEC_TEMPLATE" == *"resources/local/chainspec.toml.in"* ]] || \
        [[ "$PATH_TO_CHAINSPEC_TEMPLATE" == *"stages"* ]]; then
         SCRIPT+=("cfg['core']['validator_slots']=$COUNT_NODES;")
+    fi
+
+    if [ -n "$HARD_RESET" ]; then
+        SCRIPT+=("cfg['protocol']['hard_reset']=$HARD_RESET;")
     fi
 
     SCRIPT+=("toml.dump(cfg, open('$PATH_TO_CHAINSPEC', 'w'));")

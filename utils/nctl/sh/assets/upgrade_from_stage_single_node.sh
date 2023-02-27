@@ -104,6 +104,7 @@ function _setup_asset_chainspec()
     local ACTIVATION_POINT=${2}
     local PATH_TO_CHAINSPEC_TEMPLATE=${3}
     local IS_GENESIS=${4}
+    local HARD_RESET=${5}
     local PATH_TO_CHAINSPEC
     local SCRIPT
     local COUNT_NODES
@@ -128,7 +129,6 @@ function _setup_asset_chainspec()
             "cfg['protocol']['version']='$PROTOCOL_VERSION';"
             "cfg['network']['name']='$(get_chain_name)';"
             "cfg['core']['validator_slots']=$COUNT_NODES;"
-            "toml.dump(cfg, open('$PATH_TO_CHAINSPEC', 'w'));"
         )
     else
         SCRIPT=(
@@ -138,9 +138,14 @@ function _setup_asset_chainspec()
             "cfg['protocol']['version']='$PROTOCOL_VERSION';"
             "cfg['network']['name']='$(get_chain_name)';"
             "cfg['core']['validator_slots']=$COUNT_NODES;"
-            "toml.dump(cfg, open('$PATH_TO_CHAINSPEC', 'w'));"
         )
     fi
+
+    if [ -n "$HARD_RESET" ]; then
+        SCRIPT+=("cfg['protocol']['hard_reset']=$HARD_RESET;")
+    fi
+
+    SCRIPT+=("toml.dump(cfg, open('$PATH_TO_CHAINSPEC', 'w'));")
 
     python3 -c "${SCRIPT[*]}"
 }
@@ -347,6 +352,7 @@ function _main()
     local NODE_ID=${4}
     local CHAINSPEC_PATH=${5}
     local CONFIG_PATH=${6}
+    local HARD_RESET=${7}
     local PATH_TO_STAGE
     local PROTOCOL_VERSION
 
@@ -376,7 +382,8 @@ function _main()
         _setup_asset_chainspec "$(get_protocol_version_for_chainspec "$PROTOCOL_VERSION")" \
                               "$ACTIVATION_POINT" \
                               "$CHAINSPEC_PATH" \
-                              false
+                              false \
+                              "$HARD_RESET"
         _setup_asset_node_configs "$NODE_ID" \
                                  "$PROTOCOL_VERSION" \
                                  "$CONFIG_PATH" \
@@ -415,6 +422,7 @@ do
         node) NODE_ID=${VALUE} ;;
         chainspec_path) CHAINSPEC_PATH=${VALUE} ;;
         config_path) CONFIG_PATH=${VALUE} ;;
+        hard_reset) HARD_RESET=${VALUE} ;;
         *)
     esac
 done
@@ -430,4 +438,5 @@ _main "${STAGE_ID:-1}" \
       "${VERBOSE:-true}" \
       "${NODE_ID}" \
       "${CHAINSPEC_PATH}" \
-      "${CONFIG_PATH}"
+      "${CONFIG_PATH}" \
+      "${HARD_RESET}"
