@@ -601,9 +601,11 @@ impl BlockBuilder {
         trie_hash: Digest,
         trie_raw: TrieRaw,
         put_trie_result: Result<Digest, engine_state::Error>,
-    ) {
-        self.acquisition_state
-            .register_put_trie(trie_hash, trie_raw, put_trie_result);
+    ) -> Result<(), Error> {
+        let acceptance =
+            self.acquisition_state
+                .register_put_trie(trie_hash, trie_raw, put_trie_result);
+        self.handle_acceptance(None, acceptance)
     }
 
     pub(super) fn register_deploy(

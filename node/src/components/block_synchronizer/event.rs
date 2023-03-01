@@ -8,9 +8,7 @@ use serde::Serialize;
 use casper_execution_engine::{core::engine_state, storage::trie::TrieRaw};
 
 use crate::{
-    components::{
-        fetcher::FetchResult,
-    },
+    components::fetcher::FetchResult,
     effect::requests::BlockSynchronizerRequest,
     types::{
         ApprovalsHashes, Block, BlockExecutionResultsOrChunk, BlockHash, BlockHeader, Deploy,

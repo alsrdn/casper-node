@@ -480,11 +480,33 @@ impl BlockAcquisitionState {
         trie_hash: Digest,
         trie_raw: TrieRaw,
         put_trie_result: Result<Digest, engine_state::Error>,
-    ) {
-        match self {
-            BlockAcquisitionState::HaveBlock(_, _, _, Some(global_state_acq)) => {
-                global_state_acq.register_put_trie(trie_hash, trie_raw, put_trie_result);
-            }
+    ) -> Result<Option<Acceptance>, BlockAcquisitionError> {
+        let (maybe_new_state, ret) = match self {
+            BlockAcquisitionState::HaveBlock(
+                block,
+                acquired_signatures,
+                deploy_acquisition,
+                Some(global_state_acq),
+            ) => match global_state_acq.register_put_trie(trie_hash, trie_raw, put_trie_result) {
+                Ok(()) => {
+                    if global_state_acq.is_finished() {
+                        (
+                            Some(BlockAcquisitionState::HaveGlobalState(
+                                block.clone(),
+                                acquired_signatures.clone(),
+                                deploy_acquisition.clone(),
+                                ExecutionResultsAcquisition::Needed {
+                                    block_hash: *block.hash(),
+                                },
+                            )),
+                            Ok(Some(Acceptance::NeededIt)),
+                        )
+                    } else {
+                        (None, Ok(Some(Acceptance::NeededIt)))
+                    }
+                }
+                Err(e) => (None, Err(BlockAcquisitionError::GlobalStateAcquisition(e))),
+            },
             BlockAcquisitionState::HaveBlock(_, _, _, None)
             | BlockAcquisitionState::Initialized(_, _)
             | BlockAcquisitionState::HaveBlockHeader(_, _)
@@ -494,8 +516,13 @@ impl BlockAcquisitionState {
             | BlockAcquisitionState::HaveApprovalsHashes(_, _, _)
             | BlockAcquisitionState::HaveAllDeploys(_, _)
             | BlockAcquisitionState::HaveStrictFinalitySignatures(_, _)
-            | BlockAcquisitionState::Failed(_, _) => {}
+            | BlockAcquisitionState::Failed(_, _) => (None, Ok(None)),
+        };
+
+        if let Some(new_state) = maybe_new_state {
+            self.set_state(new_state);
         }
+        ret
     }
 
     /// The block height of the current block, if available.

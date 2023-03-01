@@ -514,7 +514,9 @@ impl BlockSynchronizer {
         put_trie_result: Result<Digest, engine_state::Error>,
     ) {
         if let Some(builder) = &mut self.historical {
-            builder.register_put_trie(trie_hash, trie_raw, put_trie_result);
+            if let Err(error) = builder.register_put_trie(trie_hash, trie_raw, put_trie_result) {
+                warn!(%error, "BlockSynchronizer: failed to announce put trie");
+            }
         }
     }
 
@@ -551,6 +553,7 @@ impl BlockSynchronizer {
         let max_simultaneous_peers = self.max_simultaneous_peers as usize;
         let mut builder_needs_next = |builder: &mut BlockBuilder| {
             if builder.in_flight_latch().is_some() || builder.is_finished() {
+                debug!("BlockSynchronizer: latch is still active, skipping need next");
                 return;
             }
             let action = builder.block_acquisition_action(rng, max_simultaneous_peers);
@@ -609,10 +612,9 @@ impl BlockSynchronizer {
                     tries_to_fetch,
                 ) => {
                     //TODO: latch magic! builder.set_in_flight_latch();
+                    builder.set_in_flight_latch();
                     let mut trie_fetches_in_progress: HashSet<Digest> = HashSet::new();
-                    for (trie_id, peer) in tries_to_fetch
-                        .into_iter()
-                        .zip(peers.into_iter().cycle())
+                    for (trie_id, peer) in tries_to_fetch.into_iter().zip(peers.into_iter().cycle())
                     {
                         trie_fetches_in_progress.insert(*trie_id.digest());
                         results.extend(
@@ -621,7 +623,7 @@ impl BlockSynchronizer {
                                 .event(move |result| Event::TrieOrChunkFetched { trie_id, result }),
                         );
                     }
-                    builder.register_pending_trie_fetches(trie_fetches_in_progress);
+                    //builder.register_pending_trie_fetches(trie_fetches_in_progress);
 
                     for (trie_hash, trie_raw) in tries_to_store {
                         results.extend(
@@ -1298,8 +1300,8 @@ impl<REv: ReactorEvent> Component<REv> for BlockSynchronizer {
                             })
                             .collect()
                         */
-                    // TODO: functionality above needs to be replaced
-                    Effects::new()
+                        // TODO: functionality above needs to be replaced
+                        Effects::new()
                     }
                 },
                 // when a peer is disconnected from for any reason, disqualify peer

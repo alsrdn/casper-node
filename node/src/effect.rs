@@ -131,9 +131,7 @@ use casper_types::{
 
 use crate::{
     components::{
-        block_synchronizer::{
-            BlockSynchronizerStatus
-        },
+        block_synchronizer::BlockSynchronizerStatus,
         consensus::{ClContext, EraDump, ProposedBlock, ValidatorChange},
         contract_runtime::{ContractRuntimeError, EraValidatorsRequest},
         deploy_acceptor,
@@ -167,8 +165,7 @@ use requests::{
     BeginGossipRequest, BlockAccumulatorRequest, BlockCompleteConfirmationRequest,
     BlockSynchronizerRequest, BlockValidationRequest, ChainspecRawBytesRequest, ConsensusRequest,
     FetcherRequest, MakeBlockExecutableRequest, NetworkInfoRequest, NetworkRequest,
-    ReactorStatusRequest, StorageRequest,
-    UpgradeWatcherRequest,
+    ReactorStatusRequest, StorageRequest, UpgradeWatcherRequest,
 };
 
 use self::{

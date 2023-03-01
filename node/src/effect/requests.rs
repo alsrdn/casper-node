@@ -33,9 +33,7 @@ use casper_types::{
 
 use crate::{
     components::{
-        block_synchronizer::{
-            BlockSynchronizerStatus,
-        },
+        block_synchronizer::BlockSynchronizerStatus,
         consensus::{ClContext, ProposedBlock, ValidatorChange},
         contract_runtime::EraValidatorsRequest,
         deploy_acceptor::Error,
