@@ -1148,7 +1148,6 @@ impl Display for BlockAccumulatorRequest {
 pub(crate) enum BlockSynchronizerRequest {
     NeedNext,
     DishonestPeers,
-    SyncGlobalStates(Vec<(BlockHash, Digest)>, Vec<NodeId>),
     Status {
         responder: Responder<BlockSynchronizerStatus>,
     },
@@ -1165,9 +1164,6 @@ impl Display for BlockSynchronizerRequest {
             }
             BlockSynchronizerRequest::Status { .. } => {
                 write!(f, "block synchronizer request: status")
-            }
-            BlockSynchronizerRequest::SyncGlobalStates(_, _) => {
-                write!(f, "request to sync global states")
             }
         }
     }

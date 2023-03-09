@@ -142,6 +142,7 @@ mod tests {
             block1.protocol_version(),
             true,
             iter::empty(),
+            None,
         ));
         let deploy = Deploy::random(&mut rng);
         let execution_results = vec![(*deploy.hash(), deploy.take_header(), rng.gen())];

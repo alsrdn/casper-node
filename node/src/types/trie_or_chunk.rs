@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use casper_hashing::{ChunkWithProofVerificationError, Digest};
 
-use super::{value_or_chunk::HashingTrieRaw, Chunkable, ChunkingError, ValueOrChunk};
+use super::{value_or_chunk::HashingTrieRaw, ChunkingError, ValueOrChunk};
 use crate::{
     components::fetcher::{EmptyValidationMetadata, FetchItem, Tag},
     utils::ds,
@@ -59,14 +59,21 @@ impl Display for TrieOrChunkId {
     }
 }
 
-/// value.
+#[derive(thiserror::Error, Debug, DataSize, Clone, PartialEq, Eq)]
+pub enum TrieOrChunkValidationError {
+    #[error(transparent)]
+    ChunkWithProofVerification(ChunkWithProofVerificationError),
+    #[error("Trie or chunk root hash mismatch; expected: {expected}; actual: {actual}")]
+    RootHashMismatch { actual: Digest, expected: Digest },
+}
+
 #[derive(Clone, Serialize, Deserialize, Debug, Eq, DataSize)]
 pub struct TrieOrChunk {
     trie_hash: Digest,
     value: ValueOrChunk<HashingTrieRaw>,
     #[serde(skip)]
     #[data_size(with = ds::once_cell)]
-    is_valid: OnceCell<Result<bool, ChunkWithProofVerificationError>>,
+    is_valid: OnceCell<Result<(), TrieOrChunkValidationError>>,
 }
 
 impl TrieOrChunk {
@@ -76,19 +83,11 @@ impl TrieOrChunk {
         chunk_index: u64,
     ) -> Result<TrieOrChunk, ChunkingError> {
         let value = ValueOrChunk::<HashingTrieRaw>::new(trie_raw, chunk_index)?;
-        // TODO: revisit this
-        let is_valid = match value {
-            ValueOrChunk::Value(_) => Ok(true),
-            ValueOrChunk::ChunkWithProof(ref chunk_with_proof) => match chunk_with_proof.verify() {
-                Ok(()) => Ok(true),
-                Err(_) => Ok(false),
-            },
-        };
 
         Ok(TrieOrChunk {
             trie_hash,
             value,
-            is_valid: is_valid.into(),
+            is_valid: OnceCell::new(),
         })
     }
 
@@ -122,7 +121,7 @@ impl Display for TrieOrChunk {
 
 impl FetchItem for TrieOrChunk {
     type Id = TrieOrChunkId;
-    type ValidationError = ChunkWithProofVerificationError;
+    type ValidationError = TrieOrChunkValidationError;
     type ValidationMetadata = EmptyValidationMetadata;
 
     const TAG: Tag = Tag::TrieOrChunk;
@@ -138,24 +137,34 @@ impl FetchItem for TrieOrChunk {
     }
 
     fn validate(&self, _metadata: &EmptyValidationMetadata) -> Result<(), Self::ValidationError> {
-        match self.value {
-            ValueOrChunk::Value(_) => {
-                self.is_valid.get_or_init(|| Ok(true));
-                Ok(())
-            }
-            ValueOrChunk::ChunkWithProof(ref chunk_with_proof) => {
-                match self
-                    .is_valid
-                    .get_or_init(|| match chunk_with_proof.verify() {
-                        Ok(()) => Ok(true),
-                        Err(e) => Err(e),
-                    }) {
-                    // TODO: fix this
-                    Ok(true) => Ok(()),
-                    Ok(false) => Err(ChunkWithProofVerificationError::UnexpectedRootHash),
-                    Err(e) => Err(e.clone()),
+        self.is_valid
+            .get_or_init(|| match self.value {
+                ValueOrChunk::Value(ref trie) => {
+                    if trie.hash() == self.trie_hash {
+                        Ok(())
+                    } else {
+                        Err(TrieOrChunkValidationError::RootHashMismatch {
+                            actual: trie.hash(),
+                            expected: self.trie_hash,
+                        })
+                    }
                 }
-            }
-        }
+                ValueOrChunk::ChunkWithProof(ref chunk_with_proof) => {
+                    match chunk_with_proof.verify() {
+                        Ok(()) => {
+                            if chunk_with_proof.proof().root_hash() == self.trie_hash {
+                                Ok(())
+                            } else {
+                                Err(TrieOrChunkValidationError::RootHashMismatch {
+                                    actual: chunk_with_proof.proof().root_hash(),
+                                    expected: self.trie_hash,
+                                })
+                            }
+                        }
+                        Err(e) => Err(TrieOrChunkValidationError::ChunkWithProofVerification(e)),
+                    }
+                }
+            })
+            .clone()
     }
 }

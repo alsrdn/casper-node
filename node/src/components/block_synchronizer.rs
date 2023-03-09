@@ -4,6 +4,7 @@ mod block_builder;
 mod block_synchronizer_progress;
 mod config;
 mod deploy_acquisition;
+mod era_validators_acquisition;
 mod error;
 mod event;
 mod execution_results_acquisition;
@@ -19,6 +20,7 @@ mod tests;
 
 use std::{collections::HashSet, sync::Arc};
 
+use casper_types::system::auction::EraValidators;
 use datasize::DataSize;
 use either::Either;
 use futures::FutureExt;
@@ -30,7 +32,8 @@ use tracing::{debug, error, info, trace, warn};
 
 use casper_execution_engine::{core::engine_state, storage::trie::TrieRaw};
 use casper_hashing::Digest;
-use casper_types::Timestamp;
+
+use self::event::EraValidatorsGetError;
 
 use super::network::blocklist::BlocklistJustification;
 use crate::{
@@ -40,6 +43,7 @@ use crate::{
         },
         Component, ComponentState, InitializedComponent, ValidatorBoundComponent,
     },
+    contract_runtime::EraValidatorsRequest,
     effect::{
         announcements::{MetaBlockAnnouncement, PeerBehaviorAnnouncement},
         requests::{
@@ -49,12 +53,12 @@ use crate::{
         },
         EffectBuilder, EffectExt, Effects,
     },
-    reactor::{self, main_reactor::MainEvent},
+    reactor::main_reactor::MainEvent,
     rpcs::docs::DocExample,
     types::{
         ApprovalsHashes, Block, BlockExecutionResultsOrChunk, BlockHash, BlockHeader,
         BlockSignatures, Deploy, FinalitySignature, FinalitySignatureId, LegacyDeploy, MetaBlock,
-        MetaBlockState, NodeId, SyncLeap, TrieOrChunk, TrieOrChunkId, ValidatorMatrix,
+        MetaBlockState, NodeId, SyncLeap, TrieOrChunk, ValidatorMatrix,
     },
     NodeRng,
 };
@@ -254,6 +258,7 @@ impl BlockSynchronizer {
         block_hash: BlockHash,
         should_fetch_execution_state: bool,
         requires_strict_finality: bool,
+        get_evw_from_global_state: bool,
     ) -> bool {
         if let (true, Some(builder), _) | (false, _, Some(builder)) = (
             should_fetch_execution_state,
@@ -270,7 +275,7 @@ impl BlockSynchronizer {
             requires_strict_finality,
             self.max_simultaneous_peers,
             self.config.peer_refresh_interval(),
-            self.config.max_parallel_trie_fetches() as usize,
+            get_evw_from_global_state,
         );
         if should_fetch_execution_state {
             self.historical.replace(builder);
@@ -473,7 +478,12 @@ impl BlockSynchronizer {
         effects
     }
 
-    fn trie_or_chunk_fetched(&mut self, trie_id: TrieOrChunkId, result: FetchResult<TrieOrChunk>) {
+    fn trie_or_chunk_fetched(
+        &mut self,
+        block_hash: BlockHash,
+        trie_hash: Digest,
+        result: FetchResult<TrieOrChunk>,
+    ) {
         let (id, maybe_trie_or_chunk, maybe_peer) = match result {
             Ok(FetchedData::FromPeer { item, peer }) => {
                 debug!(
@@ -486,24 +496,40 @@ impl BlockSynchronizer {
             Err(err) => {
                 debug!(%err, "BlockSynchronizer: failed to fetch trie or chunk");
                 if err.is_peer_fault() {
-                    (err.id().clone(), None, Some(*err.peer()))
+                    (*err.id(), None, Some(*err.peer()))
                 } else {
-                    (err.id().clone(), None, None)
+                    (*err.id(), None, None)
                 }
             }
         };
 
         if let Some(builder) = &mut self.historical {
+            if builder.block_hash() != block_hash {
+                debug!(%block_hash, "BlockSynchronizer: not currently synchronizing block");
+                return;
+            }
+
             match maybe_trie_or_chunk {
                 None => {
+                    debug!(%block_hash, trie_or_chunk_id=?id, ?maybe_peer, "BlockSynchronizer: failed to fetch trie or chunk from peer");
                     builder.demote_peer(maybe_peer);
+                    if let Err(error) = builder.register_trie_fetch_error(trie_hash) {
+                        debug!(%error, trie_or_chunk_id=%id, "BlockSynchronizer: failed to register trie fetch error");
+                    }
                 }
                 Some(trie_or_chunk) => {
-                    if let Err(error) = builder.register_trie_or_chunk(*trie_or_chunk, maybe_peer) {
-                        warn!(%error, "BlockSynchronizer: failed to apply trie_or_chunk");
+                    if let Err(error) =
+                        builder.register_trie_or_chunk(trie_hash, *trie_or_chunk, maybe_peer)
+                    {
+                        // This would only happen if somehow validation of the trie or chunk was
+                        // bypassed or there is a programming error in the fetch validation logic.
+                        error!(%error, trie_or_chunk_id=%id, "BlockSynchronizer: failed to apply trie_or_chunk; aborting sync.");
+                        builder.abort();
                     }
                 }
             }
+        } else {
+            trace!(%block_hash, "BlockSynchronizer: not currently synchronizing historical block");
         }
     }
 
@@ -516,6 +542,30 @@ impl BlockSynchronizer {
         if let Some(builder) = &mut self.historical {
             if let Err(error) = builder.register_put_trie(trie_hash, trie_raw, put_trie_result) {
                 warn!(%error, "BlockSynchronizer: failed to announce put trie");
+            }
+        }
+    }
+
+    fn register_block_header_requested_from_storage(&mut self, block_header: Option<BlockHeader>) {
+        if let Some(builder) = &mut self.historical {
+            if let Err(error) = builder.register_block_header_requested_from_storage(block_header) {
+                warn!(%error, "BlockSynchronizer: register a block_header_requested_from_storage");
+                builder.abort();
+            }
+        }
+    }
+
+    fn register_era_validators_from_contract_runtime(
+        &mut self,
+        from_state_root_hash: Digest,
+        era_validators: Result<EraValidators, EraValidatorsGetError>,
+    ) {
+        if let Some(builder) = &mut self.historical {
+            if let Err(error) = builder
+                .register_era_validators_from_contract_runtime(from_state_root_hash, era_validators)
+            {
+                warn!(%error, "BlockSynchronizer: register a block_header_requested_from_storage");
+                builder.abort();
             }
         }
     }
@@ -551,203 +601,238 @@ impl BlockSynchronizer {
         let need_next_interval = self.config.need_next_interval().into();
         let mut results = Effects::new();
         let max_simultaneous_peers = self.max_simultaneous_peers as usize;
-        let mut builder_needs_next = |builder: &mut BlockBuilder| {
-            if builder.in_flight_latch().is_some() || builder.is_finished() {
-                debug!("BlockSynchronizer: latch is still active, skipping need next");
-                return;
-            }
-            let action = builder.block_acquisition_action(rng, max_simultaneous_peers);
-            let peers = action.peers_to_ask();
-            let need_next = action.need_next();
-            info!("BlockSynchronizer: {}", need_next);
-            match need_next {
-                NeedNext::Nothing(_) => {
-                    // currently idle or waiting, check back later
-                    results.extend(
-                        effect_builder
-                            .set_timeout(need_next_interval)
-                            .event(|_| Event::Request(BlockSynchronizerRequest::NeedNext)),
-                    );
+        let max_parallel_trie_fetches = self.config.max_parallel_trie_fetches() as usize;
+        let mut builder_needs_next =
+            |builder: &mut BlockBuilder| {
+                if builder.in_flight_latch().is_some() || builder.is_finished() {
+                    debug!("BlockSynchronizer: latch is still active, skipping need next");
+                    return;
                 }
-                NeedNext::BlockHeader(block_hash) => {
-                    builder.set_in_flight_latch();
-                    results.extend(peers.into_iter().flat_map(|node_id| {
-                        effect_builder
-                            .fetch::<BlockHeader>(block_hash, node_id, EmptyValidationMetadata)
-                            .event(Event::BlockHeaderFetched)
-                    }))
-                }
-                NeedNext::BlockBody(block_hash) => {
-                    builder.set_in_flight_latch();
-                    results.extend(peers.into_iter().flat_map(|node_id| {
-                        effect_builder
-                            .fetch::<Block>(block_hash, node_id, EmptyValidationMetadata)
-                            .event(Event::BlockFetched)
-                    }))
-                }
-                NeedNext::FinalitySignatures(block_hash, era_id, validators) => {
-                    builder.set_in_flight_latch();
-                    for (validator, peer) in validators
-                        .into_iter()
-                        .take(max_simultaneous_peers)
-                        .zip(peers.into_iter().cycle())
-                    {
-                        builder.register_finality_signature_pending(validator.clone());
-                        let id = FinalitySignatureId {
-                            block_hash,
-                            era_id,
-                            public_key: validator,
-                        };
+                let action = builder.block_acquisition_action(
+                    rng,
+                    max_simultaneous_peers,
+                    max_parallel_trie_fetches,
+                );
+                let peers = action.peers_to_ask();
+                let need_next = action.need_next();
+                info!("BlockSynchronizer: {}", need_next);
+                match need_next {
+                    NeedNext::Nothing(_) => {
+                        // currently idle or waiting, check back later
                         results.extend(
                             effect_builder
-                                .fetch::<FinalitySignature>(id, peer, EmptyValidationMetadata)
-                                .event(Event::FinalitySignatureFetched),
+                                .set_timeout(need_next_interval)
+                                .event(|_| Event::Request(BlockSynchronizerRequest::NeedNext)),
                         );
                     }
-                }
-                NeedNext::GlobalState(
-                    block_hash,
-                    global_state_root_hash,
-                    tries_to_store,
-                    tries_to_fetch,
-                ) => {
-                    //TODO: latch magic! builder.set_in_flight_latch();
-                    builder.set_in_flight_latch();
-                    let mut trie_fetches_in_progress: HashSet<Digest> = HashSet::new();
-                    for (trie_id, peer) in tries_to_fetch.into_iter().zip(peers.into_iter().cycle())
-                    {
-                        trie_fetches_in_progress.insert(*trie_id.digest());
-                        results.extend(
+                    NeedNext::BlockHeader(block_hash) => {
+                        builder.set_in_flight_latch();
+                        results.extend(peers.into_iter().flat_map(|node_id| {
                             effect_builder
-                                .fetch::<TrieOrChunk>(trie_id, peer, EmptyValidationMetadata)
-                                .event(move |result| Event::TrieOrChunkFetched { trie_id, result }),
-                        );
+                                .fetch::<BlockHeader>(block_hash, node_id, EmptyValidationMetadata)
+                                .event(Event::BlockHeaderFetched)
+                        }))
                     }
-                    //builder.register_pending_trie_fetches(trie_fetches_in_progress);
+                    NeedNext::BlockBody(block_hash) => {
+                        builder.set_in_flight_latch();
+                        results.extend(peers.into_iter().flat_map(|node_id| {
+                            effect_builder
+                                .fetch::<Block>(block_hash, node_id, EmptyValidationMetadata)
+                                .event(Event::BlockFetched)
+                        }))
+                    }
+                    NeedNext::FinalitySignatures(block_hash, era_id, validators) => {
+                        builder.set_in_flight_latch();
+                        for (validator, peer) in validators
+                            .into_iter()
+                            .take(max_simultaneous_peers)
+                            .zip(peers.into_iter().cycle())
+                        {
+                            builder.register_finality_signature_pending(validator.clone());
+                            let id = FinalitySignatureId {
+                                block_hash,
+                                era_id,
+                                public_key: validator,
+                            };
+                            results.extend(
+                                effect_builder
+                                    .fetch::<FinalitySignature>(id, peer, EmptyValidationMetadata)
+                                    .event(Event::FinalitySignatureFetched),
+                            );
+                        }
+                    }
+                    NeedNext::GlobalState(
+                        block_hash,
+                        global_state_root_hash,
+                        tries_to_store,
+                        tries_to_fetch,
+                    ) => {
+                        //let foo = builder.get_max_parallel_trie_fetches();
+                        builder.set_in_flight_latch();
+                        let mut trie_fetches_in_progress: HashSet<Digest> = HashSet::new();
+                        for (trie_id, peer) in
+                            tries_to_fetch.into_iter().zip(peers.into_iter().cycle())
+                        {
+                            trie_fetches_in_progress.insert(*trie_id.digest());
+                            results.extend(
+                                effect_builder
+                                    .fetch::<TrieOrChunk>(trie_id, peer, EmptyValidationMetadata)
+                                    .event(move |result| Event::TrieOrChunkFetched {
+                                        block_hash,
+                                        trie_hash: *trie_id.digest(),
+                                        result,
+                                    }),
+                            );
+                        }
+                        //builder.register_pending_trie_fetches(trie_fetches_in_progress);
 
-                    for (trie_hash, trie_raw) in tries_to_store {
-                        results.extend(
-                            effect_builder
-                                .put_trie_if_all_children_present(trie_raw.clone())
-                                .event(move |put_trie_result| Event::PutTrieResult {
-                                    trie_hash,
-                                    trie_raw,
-                                    put_trie_result,
-                                }),
-                        )
+                        let mut put_tries_in_progress: HashSet<Digest> = HashSet::new();
+                        for (trie_hash, trie_raw) in tries_to_store {
+                            put_tries_in_progress.insert(trie_hash);
+                            results.extend(
+                                effect_builder
+                                    .put_trie_if_all_children_present(trie_raw.clone())
+                                    .event(move |put_trie_result| Event::PutTrieResult {
+                                        trie_hash,
+                                        trie_raw: Box::new(trie_raw),
+                                        put_trie_result,
+                                    }),
+                            )
+                        }
+
+                        builder.register_pending_put_tries(put_tries_in_progress);
                     }
-                }
-                NeedNext::ExecutionResultsChecksum(block_hash, global_state_root_hash) => {
-                    builder.set_in_flight_latch();
-                    results.extend(
-                        effect_builder
-                            .get_execution_results_checksum(global_state_root_hash)
-                            .event(move |result| Event::GotExecutionResultsChecksum {
-                                block_hash,
-                                result,
-                            }),
-                    );
-                }
-                NeedNext::ExecutionResults(block_hash, id, checksum) => {
-                    builder.set_in_flight_latch();
-                    results.extend(peers.into_iter().flat_map(|node_id| {
-                        debug!("attempting to fetch BlockExecutionResultsOrChunk");
-                        effect_builder
-                            .fetch::<BlockExecutionResultsOrChunk>(id, node_id, checksum)
-                            .event(move |result| Event::ExecutionResultsFetched {
-                                block_hash,
-                                result,
-                            })
-                    }))
-                }
-                NeedNext::ApprovalsHashes(block_hash, block) => {
-                    builder.set_in_flight_latch();
-                    results.extend(peers.into_iter().flat_map(|node_id| {
-                        effect_builder
-                            .fetch::<ApprovalsHashes>(block_hash, node_id, *block.clone())
-                            .event(Event::ApprovalsHashesFetched)
-                    }))
-                }
-                NeedNext::DeployByHash(block_hash, deploy_hash) => {
-                    builder.set_in_flight_latch();
-                    results.extend(peers.into_iter().flat_map(|node_id| {
-                        effect_builder
-                            .fetch::<LegacyDeploy>(deploy_hash, node_id, EmptyValidationMetadata)
-                            .event(move |result| Event::DeployFetched {
-                                block_hash,
-                                result: Either::Left(result),
-                            })
-                    }))
-                }
-                NeedNext::DeployById(block_hash, deploy_id) => {
-                    builder.set_in_flight_latch();
-                    results.extend(peers.into_iter().flat_map(|node_id| {
-                        effect_builder
-                            .fetch::<Deploy>(deploy_id, node_id, EmptyValidationMetadata)
-                            .event(move |result| Event::DeployFetched {
-                                block_hash,
-                                result: Either::Right(result),
-                            })
-                    }))
-                }
-                NeedNext::EnqueueForExecution(block_hash, _) => {
-                    if false == builder.should_fetch_execution_state() {
+                    NeedNext::ExecutionResultsChecksum(block_hash, global_state_root_hash) => {
                         builder.set_in_flight_latch();
                         results.extend(
                             effect_builder
-                                .make_block_executable(block_hash)
-                                .event(move |result| Event::MadeFinalizedBlock {
+                                .get_execution_results_checksum(global_state_root_hash)
+                                .event(move |result| Event::GotExecutionResultsChecksum {
                                     block_hash,
                                     result,
                                 }),
-                        )
+                        );
                     }
-                }
-                NeedNext::BlockMarkedComplete(block_hash, block_height) => {
-                    // Only mark the block complete if we're syncing historical
-                    // because we have global state and execution effects (if
-                    // any).
-                    if builder.should_fetch_execution_state() {
+                    NeedNext::ExecutionResults(block_hash, id, checksum) => {
                         builder.set_in_flight_latch();
-                        results.extend(
-                            effect_builder.mark_block_completed(block_height).event(
-                                move |is_new| Event::MarkBlockCompleted { block_hash, is_new },
-                            ),
-                        )
+                        results.extend(peers.into_iter().flat_map(|node_id| {
+                            debug!("attempting to fetch BlockExecutionResultsOrChunk");
+                            effect_builder
+                                .fetch::<BlockExecutionResultsOrChunk>(id, node_id, checksum)
+                                .event(move |result| Event::ExecutionResultsFetched {
+                                    block_hash,
+                                    result,
+                                })
+                        }))
                     }
-                }
-                NeedNext::Peers(block_hash) => {
-                    builder.set_in_flight_latch();
-                    if builder.should_fetch_execution_state() {
-                        // the accumulator may or may not have peers for an older block,
-                        // so we're going to also get a random sampling from networking
+                    NeedNext::ApprovalsHashes(block_hash, block) => {
+                        builder.set_in_flight_latch();
+                        results.extend(peers.into_iter().flat_map(|node_id| {
+                            effect_builder
+                                .fetch::<ApprovalsHashes>(block_hash, node_id, *block.clone())
+                                .event(Event::ApprovalsHashesFetched)
+                        }))
+                    }
+                    NeedNext::DeployByHash(block_hash, deploy_hash) => {
+                        builder.set_in_flight_latch();
+                        results.extend(peers.into_iter().flat_map(|node_id| {
+                            effect_builder
+                                .fetch::<LegacyDeploy>(
+                                    deploy_hash,
+                                    node_id,
+                                    EmptyValidationMetadata,
+                                )
+                                .event(move |result| Event::DeployFetched {
+                                    block_hash,
+                                    result: Either::Left(result),
+                                })
+                        }))
+                    }
+                    NeedNext::DeployById(block_hash, deploy_id) => {
+                        builder.set_in_flight_latch();
+                        results.extend(peers.into_iter().flat_map(|node_id| {
+                            effect_builder
+                                .fetch::<Deploy>(deploy_id, node_id, EmptyValidationMetadata)
+                                .event(move |result| Event::DeployFetched {
+                                    block_hash,
+                                    result: Either::Right(result),
+                                })
+                        }))
+                    }
+                    NeedNext::EnqueueForExecution(block_hash, _) => {
+                        if false == builder.should_fetch_execution_state() {
+                            builder.set_in_flight_latch();
+                            results.extend(effect_builder.make_block_executable(block_hash).event(
+                                move |result| Event::MadeFinalizedBlock { block_hash, result },
+                            ))
+                        }
+                    }
+                    NeedNext::BlockMarkedComplete(block_hash, block_height) => {
+                        // Only mark the block complete if we're syncing historical
+                        // because we have global state and execution effects (if
+                        // any).
+                        if builder.should_fetch_execution_state() {
+                            builder.set_in_flight_latch();
+                            results.extend(effect_builder.mark_block_completed(block_height).event(
+                                move |is_new| Event::MarkBlockCompleted { block_hash, is_new },
+                            ))
+                        }
+                    }
+                    NeedNext::Peers(block_hash) => {
+                        builder.set_in_flight_latch();
+                        if builder.should_fetch_execution_state() {
+                            // the accumulator may or may not have peers for an older block,
+                            // so we're going to also get a random sampling from networking
+                            results.extend(
+                                effect_builder
+                                    .get_fully_connected_peers(max_simultaneous_peers)
+                                    .event(move |peers| Event::NetworkPeers(block_hash, peers)),
+                            )
+                        }
                         results.extend(
                             effect_builder
-                                .get_fully_connected_peers(max_simultaneous_peers)
-                                .event(move |peers| Event::NetworkPeers(block_hash, peers)),
+                                .get_block_accumulated_peers(block_hash)
+                                .event(move |maybe_peers| {
+                                    Event::AccumulatedPeers(block_hash, maybe_peers)
+                                }),
                         )
                     }
-                    results.extend(
+                    NeedNext::EraValidators(era_id) => {
+                        warn!(
+                            "BlockSynchronizer: does not have era_validators for era_id: {}",
+                            era_id
+                        );
+                        results.extend(
+                            effect_builder
+                                .set_timeout(need_next_interval)
+                                .event(|_| Event::Request(BlockSynchronizerRequest::NeedNext)),
+                        )
+                    }
+                    NeedNext::EraValidatorsFromContractRuntime(era_validators_query_info) => {
+                        for (state_hash, protocol_version) in era_validators_query_info {
+                            let request = EraValidatorsRequest::new(state_hash, protocol_version);
+                            results.extend(
+                                effect_builder
+                                    .get_era_validators_from_contract_runtime(request)
+                                    .event(move |result| {
+                                        Event::EraValidatorsFromContractRuntime(
+                                            state_hash,
+                                            result.map_err(|err| err.into()),
+                                        )
+                                    }),
+                            )
+                        }
+                    }
+                    NeedNext::UpdateEraValidators(era_id, validator_weights) => {
+                        //TODO: update reactor validator matrix
+                    }
+                    NeedNext::BlockHeaderFromStorage(block_hash) => results.extend(
                         effect_builder
-                            .get_block_accumulated_peers(block_hash)
-                            .event(move |maybe_peers| {
-                                Event::AccumulatedPeers(block_hash, maybe_peers)
-                            }),
-                    )
+                            .get_block_header_from_storage(block_hash, false)
+                            .event(move |block_header| Event::BlockHeaderFromStorage(block_header)),
+                    ),
                 }
-                NeedNext::EraValidators(era_id) => {
-                    warn!(
-                        "BlockSynchronizer: does not have era_validators for era_id: {}",
-                        era_id
-                    );
-                    results.extend(
-                        effect_builder
-                            .set_timeout(need_next_interval)
-                            .event(|_| Event::Request(BlockSynchronizerRequest::NeedNext)),
-                    )
-                }
-            }
-        };
+            };
 
         if let Some(builder) = &mut self.forward {
             builder_needs_next(builder);
@@ -1218,7 +1303,9 @@ impl<REv: ReactorEvent> Component<REv> for BlockSynchronizer {
                     | Event::AccumulatedPeers(_, _)
                     | Event::NetworkPeers(_, _)
                     | Event::TrieOrChunkFetched { .. }
-                    | Event::PutTrieResult { .. } => {
+                    | Event::PutTrieResult { .. }
+                    | Event::EraValidatorsFromContractRuntime(..)
+                    | Event::BlockHeaderFromStorage(_) => {
                         warn!(
                             ?event,
                             name = <Self as Component<MainEvent>>::name(self),
@@ -1271,37 +1358,6 @@ impl<REv: ReactorEvent> Component<REv> for BlockSynchronizer {
                                 }),
                         );
                         effects
-                    }
-
-                    // this is a request that's separate from a typical block synchronizer flow;
-                    // it's sent when we need to sync global states of an immediate switch block
-                    // and its parent in order to check whether the validators have been
-                    // changed by the upgrade
-                    BlockSynchronizerRequest::SyncGlobalStates(global_states, peers_to_ask) => {
-                        /*
-                        global_states
-                            .into_iter()
-                            .flat_map(move |(block_hash, global_state_hash)| {
-                                // only start syncing the state if we haven't started already
-                                if !self
-                                    .global_sync
-                                    .has_global_state_request(&global_state_hash)
-                                {
-                                    effect_builder
-                                        .sync_global_state(
-                                            block_hash,
-                                            global_state_hash,
-                                            peers_to_ask.clone().into_iter().collect(),
-                                        )
-                                        .ignore()
-                                } else {
-                                    Effects::new()
-                                }
-                            })
-                            .collect()
-                        */
-                        // TODO: functionality above needs to be replaced
-                        Effects::new()
                     }
                 },
                 // when a peer is disconnected from for any reason, disqualify peer
@@ -1434,9 +1490,13 @@ impl<REv: ReactorEvent> Component<REv> for BlockSynchronizer {
                     debug!(%block_hash, "BlockSynchronizer: got 0 peers from accumulator");
                     self.need_next(effect_builder, rng)
                 }
-                Event::TrieOrChunkFetched { trie_id, result } => {
-                    debug!(%trie_id, "BlockSynchronizer: got a trie or chunk");
-                    self.trie_or_chunk_fetched(trie_id, result);
+                Event::TrieOrChunkFetched {
+                    block_hash,
+                    trie_hash,
+                    result,
+                } => {
+                    debug!(%trie_hash, "BlockSynchronizer: got a trie or chunk");
+                    self.trie_or_chunk_fetched(block_hash, trie_hash, result);
                     self.need_next(effect_builder, rng)
                 }
                 Event::PutTrieResult {
@@ -1445,7 +1505,15 @@ impl<REv: ReactorEvent> Component<REv> for BlockSynchronizer {
                     put_trie_result,
                 } => {
                     debug!(%trie_hash, "BlockSynchronizer: got a response from the Contract Runtime for PutTrie");
-                    self.put_trie_result(trie_hash, trie_raw, put_trie_result);
+                    self.put_trie_result(trie_hash, *trie_raw, put_trie_result);
+                    self.need_next(effect_builder, rng)
+                }
+                Event::EraValidatorsFromContractRuntime(state_hash, era_validators) => {
+                    self.register_era_validators_from_contract_runtime(state_hash, era_validators);
+                    self.need_next(effect_builder, rng)
+                }
+                Event::BlockHeaderFromStorage(block_header) => {
+                    self.register_block_header_requested_from_storage(block_header);
                     self.need_next(effect_builder, rng)
                 }
             },

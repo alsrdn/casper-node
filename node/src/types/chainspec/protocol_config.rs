@@ -189,26 +189,61 @@ mod tests {
         };
 
         // The block before this protocol version: a switch block with previous era and version.
-        let block =
-            Block::random_with_specifics(&mut rng, previous_era, 100, past_version, true, None);
+        let block = Block::random_with_specifics(
+            &mut rng,
+            previous_era,
+            100,
+            past_version,
+            true,
+            None,
+            None,
+        );
         assert!(protocol_config.is_last_block_before_activation(block.header()));
 
         // Not the activation point: wrong era.
-        let block =
-            Block::random_with_specifics(&mut rng, upgrade_era, 100, past_version, true, None);
+        let block = Block::random_with_specifics(
+            &mut rng,
+            upgrade_era,
+            100,
+            past_version,
+            true,
+            None,
+            None,
+        );
         assert!(!protocol_config.is_last_block_before_activation(block.header()));
 
         // Not the activation point: wrong version.
-        let block =
-            Block::random_with_specifics(&mut rng, previous_era, 100, current_version, true, None);
+        let block = Block::random_with_specifics(
+            &mut rng,
+            previous_era,
+            100,
+            current_version,
+            true,
+            None,
+            None,
+        );
         assert!(!protocol_config.is_last_block_before_activation(block.header()));
-        let block =
-            Block::random_with_specifics(&mut rng, previous_era, 100, future_version, true, None);
+        let block = Block::random_with_specifics(
+            &mut rng,
+            previous_era,
+            100,
+            future_version,
+            true,
+            None,
+            None,
+        );
         assert!(!protocol_config.is_last_block_before_activation(block.header()));
 
         // Not the activation point: not a switch block.
-        let block =
-            Block::random_with_specifics(&mut rng, previous_era, 100, past_version, false, None);
+        let block = Block::random_with_specifics(
+            &mut rng,
+            previous_era,
+            100,
+            past_version,
+            false,
+            None,
+            None,
+        );
         assert!(!protocol_config.is_last_block_before_activation(block.header()));
     }
 }

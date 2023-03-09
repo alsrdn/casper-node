@@ -30,6 +30,9 @@ pub(crate) enum BlockAcquisitionError {
     InvalidAttemptToEnqueueBlockForExecution,
     ExecutionResults(super::execution_results_acquisition::Error),
     GlobalStateAcquisition(super::global_state_acquisition::Error),
+    EraValidatorsAcquisition(super::era_validators_acquisition::Error),
+    BlockHeaderMissing,
+    MissingEraValidatorWeights,
 }
 
 impl Display for BlockAcquisitionError {
@@ -73,6 +76,18 @@ impl Display for BlockAcquisitionError {
             }
             BlockAcquisitionError::GlobalStateAcquisition(error) => {
                 write!(f, "error when acquiring global state: {}", error)
+            }
+            BlockAcquisitionError::EraValidatorsAcquisition(error) => {
+                write!(f, "error when acquiring era validators: {}", error)
+            }
+            BlockAcquisitionError::BlockHeaderMissing => {
+                write!(
+                    f,
+                    "failed to get header from storage even if it was expected to exist"
+                )
+            }
+            BlockAcquisitionError::MissingEraValidatorWeights => {
+                write!(f, "missing era validator weights")
             }
         }
     }

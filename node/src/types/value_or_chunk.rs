@@ -8,15 +8,10 @@ use once_cell::sync::OnceCell;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use casper_hashing::{
-    ChunkWithProof, ChunkWithProofVerificationError, Digest, MerkleConstructionError,
-};
+use casper_hashing::{ChunkWithProof, Digest, MerkleConstructionError};
 
 use super::Chunkable;
-use crate::{
-    components::fetcher::{EmptyValidationMetadata, FetchItem, Tag},
-    utils::ds,
-};
+use crate::utils::ds;
 
 /// Represents a value or a chunk of data with attached proof.
 ///

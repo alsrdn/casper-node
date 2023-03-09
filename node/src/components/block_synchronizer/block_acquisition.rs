@@ -9,7 +9,7 @@ use derive_more::Display;
 use tracing::{debug, error, info, trace, warn};
 
 use casper_hashing::Digest;
-use casper_types::PublicKey;
+use casper_types::{system::auction::EraValidators, ProtocolVersion, PublicKey};
 
 use crate::{
     components::block_synchronizer::{
@@ -20,11 +20,18 @@ use crate::{
     types::{
         ApprovalsHashes, Block, BlockExecutionResultsOrChunk, BlockHash, BlockHeader, DeployHash,
         DeployId, EraValidatorWeights, FinalitySignature, SignatureWeight, TrieOrChunk,
+        TrieOrChunkId,
     },
     NodeRng,
 };
 
-use super::global_state_acquisition::GlobalStateAcquisition;
+use super::{
+    era_validators_acquisition::{
+        EraValidatorsAcquisition, Error as EraValidatorsAcquisitionError,
+    },
+    event::EraValidatorsGetError,
+    global_state_acquisition::{Error as GlobalStateAcquisitionError, GlobalStateAcquisition},
+};
 
 // BlockAcquisitionState is a milestone oriented state machine; it is always in a resting state
 // indicating the last completed step, while attempting to acquire the necessary data to transition
@@ -88,7 +95,13 @@ use super::global_state_acquisition::GlobalStateAcquisition;
 #[derive(Clone, DataSize, Debug)]
 pub(super) enum BlockAcquisitionState {
     Initialized(BlockHash, SignatureAcquisition),
-    HaveBlockHeader(Box<BlockHeader>, SignatureAcquisition),
+    HaveBlockHeader {
+        header: Box<BlockHeader>,
+        acquired_signatures: SignatureAcquisition,
+        acquired_block_era_validators: EraValidatorsAcquisition,
+        acquired_parent_block_era_validators: EraValidatorsAcquisition,
+        parent_block_header: Option<BlockHeader>,
+    },
     HaveWeakFinalitySignatures(Box<BlockHeader>, SignatureAcquisition),
     HaveBlock(
         Box<Block>,
@@ -120,7 +133,10 @@ impl Display for BlockAcquisitionState {
             BlockAcquisitionState::Initialized(block_hash, _) => {
                 write!(f, "initialized for: {}", block_hash)
             }
-            BlockAcquisitionState::HaveBlockHeader(block_header, _) => write!(
+            BlockAcquisitionState::HaveBlockHeader {
+                header: block_header,
+                ..
+            } => write!(
                 f,
                 "have block header({}) for: {}",
                 block_header.height(),
@@ -180,7 +196,10 @@ impl BlockAcquisitionState {
         match self {
             BlockAcquisitionState::Initialized(block_hash, _)
             | BlockAcquisitionState::Failed(block_hash, _) => *block_hash,
-            BlockAcquisitionState::HaveBlockHeader(block_header, _)
+            BlockAcquisitionState::HaveBlockHeader {
+                header: block_header,
+                ..
+            }
             | BlockAcquisitionState::HaveWeakFinalitySignatures(block_header, _) => {
                 block_header.block_hash()
             }
@@ -197,7 +216,7 @@ impl BlockAcquisitionState {
         match self {
             BlockAcquisitionState::Initialized(..)
             | BlockAcquisitionState::Failed(..)
-            | BlockAcquisitionState::HaveBlockHeader(..)
+            | BlockAcquisitionState::HaveBlockHeader { .. }
             | BlockAcquisitionState::HaveWeakFinalitySignatures(..) => None,
             BlockAcquisitionState::HaveAllDeploys(block, _)
             | BlockAcquisitionState::HaveStrictFinalitySignatures(block, _)
@@ -273,10 +292,11 @@ impl BlockAcquisitionState {
     pub(super) fn next_action(
         &mut self,
         peer_list: &PeerList,
-        validator_weights: &EraValidatorWeights,
+        validator_weights: Option<&EraValidatorWeights>,
         rng: &mut NodeRng,
         is_historical: bool,
         max_simultaneous_peers: usize,
+        max_parallel_trie_fetches: usize,
     ) -> Result<BlockAcquisitionAction, BlockAcquisitionError> {
         // self is the resting state we are in, ret is the next action that should be taken
         // to acquire the necessary data to get us to the next step (if any), or an error
@@ -284,32 +304,167 @@ impl BlockAcquisitionState {
             BlockAcquisitionState::Initialized(block_hash, ..) => Ok(
                 BlockAcquisitionAction::block_header(peer_list, rng, *block_hash),
             ),
-            BlockAcquisitionState::HaveBlockHeader(block_header, signatures) => {
-                if validator_weights.is_empty() {
-                    Ok(BlockAcquisitionAction::era_validators(
-                        validator_weights.era_id(),
-                    ))
-                } else {
-                    // Collect signatures with Vacant state or which are currently missing from the
-                    // SignatureAcquisition.
-                    let mut missing_signatures: HashSet<PublicKey> = validator_weights
-                        .missing_validators(signatures.not_vacant())
-                        .cloned()
-                        .collect();
-                    // If there are too few, retry any in Pending state.
-                    if missing_signatures.len() < max_simultaneous_peers {
-                        missing_signatures.extend(
-                            validator_weights
-                                .missing_validators(signatures.not_pending())
-                                .cloned(),
-                        );
+            BlockAcquisitionState::HaveBlockHeader {
+                header,
+                acquired_signatures,
+                acquired_block_era_validators,
+                acquired_parent_block_era_validators,
+                parent_block_header,
+            } => {
+                if let Some(validator_weights) = validator_weights {
+                    if validator_weights.is_empty() {
+                        Ok(BlockAcquisitionAction::era_validators(
+                            validator_weights.era_id(),
+                        ))
+                    } else {
+                        // Collect signatures with Vacant state or which are currently missing from
+                        // the SignatureAcquisition.
+                        let mut missing_signatures: HashSet<PublicKey> = validator_weights
+                            .missing_validators(acquired_signatures.not_vacant())
+                            .cloned()
+                            .collect();
+                        // If there are too few, retry any in Pending state.
+                        if missing_signatures.len() < max_simultaneous_peers {
+                            missing_signatures.extend(
+                                validator_weights
+                                    .missing_validators(acquired_signatures.not_pending())
+                                    .cloned(),
+                            );
+                        }
+                        Ok(BlockAcquisitionAction::finality_signatures(
+                            peer_list,
+                            rng,
+                            header,
+                            missing_signatures.into_iter().collect(),
+                        ))
                     }
-                    Ok(BlockAcquisitionAction::finality_signatures(
-                        peer_list,
-                        rng,
-                        block_header,
-                        missing_signatures.into_iter().collect(),
-                    ))
+                } else {
+                    let block_state_root_hash = *header.state_root_hash();
+                    let block_protocol_version = header.protocol_version();
+                    let era_id = header.era_id();
+
+                    let block_era_validators = match acquired_block_era_validators {
+                        EraValidatorsAcquisition::Empty => {
+                            return Ok(
+                                BlockAcquisitionAction::era_validators_from_contract_runtime(vec![
+                                    (block_state_root_hash, block_protocol_version),
+                                ]),
+                            );
+                        }
+                        EraValidatorsAcquisition::PendingFromStorage { state_root_hash } => {
+                            return Ok(
+                                BlockAcquisitionAction::era_validators_from_contract_runtime(vec![
+                                    (block_state_root_hash, block_protocol_version),
+                                ]),
+                            );
+                        }
+                        EraValidatorsAcquisition::PendingGlobalState {
+                            global_state_acquisition,
+                        } => {
+                            return Ok(BlockAcquisitionAction::global_state(
+                                peer_list,
+                                rng,
+                                header.block_hash(),
+                                block_state_root_hash,
+                                global_state_acquisition,
+                                max_parallel_trie_fetches,
+                            ));
+                        }
+                        EraValidatorsAcquisition::Complete {
+                            state_root_hash,
+                            era_validators,
+                        } => era_validators,
+                    };
+
+                    let parent_era_validators = if let Some(parent_header) = parent_block_header {
+                        let parent_block_state_root_hash = *parent_header.state_root_hash();
+                        let parent_block_protocol_version = parent_header.protocol_version();
+
+                        match acquired_parent_block_era_validators {
+                            EraValidatorsAcquisition::Empty => {
+                                return Ok(
+                                    BlockAcquisitionAction::era_validators_from_contract_runtime(
+                                        vec![(
+                                            parent_block_state_root_hash,
+                                            parent_block_protocol_version,
+                                        )],
+                                    ),
+                                );
+                            }
+                            EraValidatorsAcquisition::PendingFromStorage { state_root_hash } => {
+                                return Ok(
+                                    BlockAcquisitionAction::era_validators_from_contract_runtime(
+                                        vec![(
+                                            parent_block_state_root_hash,
+                                            parent_block_protocol_version,
+                                        )],
+                                    ),
+                                );
+                            }
+                            EraValidatorsAcquisition::PendingGlobalState {
+                                global_state_acquisition,
+                            } => {
+                                return Ok(BlockAcquisitionAction::global_state(
+                                    peer_list,
+                                    rng,
+                                    header.block_hash(),
+                                    parent_block_state_root_hash,
+                                    global_state_acquisition,
+                                    max_parallel_trie_fetches,
+                                ));
+                            }
+                            EraValidatorsAcquisition::Complete {
+                                state_root_hash,
+                                era_validators,
+                            } => era_validators,
+                        }
+                    } else {
+                        return Ok(BlockAcquisitionAction::get_block_header_from_storage(
+                            *header.parent_hash(),
+                        ));
+                    };
+
+                    // `era_id`, being the era of the immediate switch block, will be absent in the
+                    // validators stored in the immediate switch block - therefore we will use its
+                    // successor for the comparison.
+                    let era_to_check = era_id.successor();
+                    // We read the validators for era_id+1 from the parent of the immediate switch
+                    // block.
+                    let validators_in_parent = match parent_era_validators.get(&era_to_check) {
+                        Some(validators) => validators,
+                        None => {
+                            return Err(BlockAcquisitionError::MissingEraValidatorWeights);
+                        }
+                    };
+                    // We also read the validators from the immediate switch block itself.
+                    let validators_in_block = match block_era_validators.get(&era_to_check) {
+                        Some(validators) => validators,
+                        None => {
+                            return Err(BlockAcquisitionError::MissingEraValidatorWeights);
+                        }
+                    };
+                    // Decide which validators to use for `era_id` in the validators matrix.
+                    let validators_to_register = if validators_in_parent == validators_in_block {
+                        // Nothing interesting happened - register the regular validators, ie. the
+                        // ones stored for `era_id` in the parent of the immediate switch block.
+                        match parent_era_validators.get(&era_id) {
+                            Some(validators) => validators,
+                            None => {
+                                return Err(BlockAcquisitionError::MissingEraValidatorWeights);
+                            }
+                        }
+                    } else {
+                        // We had an upgrade changing the validators! We use the same validators
+                        // that will be used for the era after the immediate
+                        // switch block, as we can't trust the ones we would
+                        // use normally.
+                        validators_in_block
+                    };
+
+                    return Ok(BlockAcquisitionAction::update_era_validators(
+                        era_id,
+                        validators_to_register.clone(),
+                    ));
                 }
             }
             BlockAcquisitionState::HaveWeakFinalitySignatures(header, _) => Ok(
@@ -328,20 +483,25 @@ impl BlockAcquisitionState {
                         *block.hash(),
                         *block.state_root_hash(),
                         global_state_acquisition,
+                        max_parallel_trie_fetches,
                     ))
                 } else if deploys.needs_deploy().is_some() {
                     Ok(BlockAcquisitionAction::approvals_hashes(
                         block, peer_list, rng,
                     ))
                 } else {
-                    Ok(BlockAcquisitionAction::strict_finality_signatures(
-                        peer_list,
-                        rng,
-                        block.header(),
-                        validator_weights,
-                        signatures,
-                        is_historical,
-                    ))
+                    if let Some(validator_weights) = validator_weights {
+                        Ok(BlockAcquisitionAction::strict_finality_signatures(
+                            peer_list,
+                            rng,
+                            block.header(),
+                            validator_weights,
+                            signatures,
+                            is_historical,
+                        ))
+                    } else {
+                        Err(BlockAcquisitionError::MissingEraValidatorWeights)
+                    }
                 }
             }
             BlockAcquisitionState::HaveGlobalState(
@@ -360,14 +520,18 @@ impl BlockAcquisitionState {
                         exec_results,
                     )
                 } else {
-                    Ok(BlockAcquisitionAction::strict_finality_signatures(
-                        peer_list,
-                        rng,
-                        block.header(),
-                        validator_weights,
-                        signatures,
-                        is_historical,
-                    ))
+                    if let Some(validator_weights) = validator_weights {
+                        Ok(BlockAcquisitionAction::strict_finality_signatures(
+                            peer_list,
+                            rng,
+                            block.header(),
+                            validator_weights,
+                            signatures,
+                            is_historical,
+                        ))
+                    } else {
+                        Err(BlockAcquisitionError::MissingEraValidatorWeights)
+                    }
                 }
             }
             BlockAcquisitionState::HaveAllExecutionResults(
@@ -383,6 +547,26 @@ impl BlockAcquisitionState {
                         block, peer_list, rng,
                     ))
                 } else {
+                    if let Some(validator_weights) = validator_weights {
+                        Ok(BlockAcquisitionAction::maybe_needs_deploy(
+                            block.header(),
+                            peer_list,
+                            rng,
+                            validator_weights,
+                            signatures,
+                            deploys.needs_deploy(),
+                            is_historical,
+                        ))
+                    } else {
+                        Err(BlockAcquisitionError::MissingEraValidatorWeights)
+                    }
+                }
+            }
+            BlockAcquisitionState::HaveAllExecutionResults(_, _, _, _) => {
+                Err(BlockAcquisitionError::InvalidStateTransition)
+            }
+            BlockAcquisitionState::HaveApprovalsHashes(block, signatures, deploys) => {
+                if let Some(validator_weights) = validator_weights {
                     Ok(BlockAcquisitionAction::maybe_needs_deploy(
                         block.header(),
                         peer_list,
@@ -392,31 +576,23 @@ impl BlockAcquisitionState {
                         deploys.needs_deploy(),
                         is_historical,
                     ))
+                } else {
+                    Err(BlockAcquisitionError::MissingEraValidatorWeights)
                 }
             }
-            BlockAcquisitionState::HaveAllExecutionResults(_, _, _, _) => {
-                Err(BlockAcquisitionError::InvalidStateTransition)
-            }
-            BlockAcquisitionState::HaveApprovalsHashes(block, signatures, deploys) => {
-                Ok(BlockAcquisitionAction::maybe_needs_deploy(
-                    block.header(),
-                    peer_list,
-                    rng,
-                    validator_weights,
-                    signatures,
-                    deploys.needs_deploy(),
-                    is_historical,
-                ))
-            }
             BlockAcquisitionState::HaveAllDeploys(block, signatures) => {
-                Ok(BlockAcquisitionAction::strict_finality_signatures(
-                    peer_list,
-                    rng,
-                    block.header(),
-                    validator_weights,
-                    signatures,
-                    is_historical,
-                ))
+                if let Some(validator_weights) = validator_weights {
+                    Ok(BlockAcquisitionAction::strict_finality_signatures(
+                        peer_list,
+                        rng,
+                        block.header(),
+                        validator_weights,
+                        signatures,
+                        is_historical,
+                    ))
+                } else {
+                    Err(BlockAcquisitionError::MissingEraValidatorWeights)
+                }
             }
             BlockAcquisitionState::HaveStrictFinalitySignatures(block, ..) => {
                 Ok(BlockAcquisitionAction::need_nothing(*block.hash()))
@@ -438,7 +614,7 @@ impl BlockAcquisitionState {
             }
             BlockAcquisitionState::HaveBlock(_, _, _, None)
             | BlockAcquisitionState::Initialized(_, _)
-            | BlockAcquisitionState::HaveBlockHeader(_, _)
+            | BlockAcquisitionState::HaveBlockHeader { .. }
             | BlockAcquisitionState::HaveWeakFinalitySignatures(_, _)
             | BlockAcquisitionState::HaveGlobalState(_, _, _, _)
             | BlockAcquisitionState::HaveAllExecutionResults(_, _, _, _)
@@ -449,88 +625,35 @@ impl BlockAcquisitionState {
         }
     }
 
-    // TODO move this down in the file where it would naturally be called
-    pub(super) fn register_trie_or_chunk(
-        &mut self,
-        trie_or_chunk: TrieOrChunk,
-        is_historical: bool,
-    ) -> Result<Option<Acceptance>, BlockAcquisitionError> {
+    pub(super) fn register_pending_put_tries(&mut self, put_tries_in_progress: HashSet<Digest>) {
         match self {
             BlockAcquisitionState::HaveBlock(_, _, _, Some(global_state_acq)) => {
-                match global_state_acq.register_trie_or_chunk(trie_or_chunk) {
-                    Ok(()) => Ok(Some(Acceptance::NeededIt)),
-                    Err(e) => Err(BlockAcquisitionError::GlobalStateAcquisition(e)),
-                }
+                global_state_acq.register_pending_put_tries(put_tries_in_progress);
             }
             BlockAcquisitionState::HaveBlock(_, _, _, None)
             | BlockAcquisitionState::Initialized(_, _)
-            | BlockAcquisitionState::HaveBlockHeader(_, _)
+            | BlockAcquisitionState::HaveBlockHeader { .. }
             | BlockAcquisitionState::HaveWeakFinalitySignatures(_, _)
             | BlockAcquisitionState::HaveGlobalState(_, _, _, _)
             | BlockAcquisitionState::HaveAllExecutionResults(_, _, _, _)
             | BlockAcquisitionState::HaveApprovalsHashes(_, _, _)
             | BlockAcquisitionState::HaveAllDeploys(_, _)
             | BlockAcquisitionState::HaveStrictFinalitySignatures(_, _)
-            | BlockAcquisitionState::Failed(_, _) => Ok(None),
+            | BlockAcquisitionState::Failed(_, _) => {}
         }
-    }
-
-    pub(super) fn register_put_trie(
-        &mut self,
-        trie_hash: Digest,
-        trie_raw: TrieRaw,
-        put_trie_result: Result<Digest, engine_state::Error>,
-    ) -> Result<Option<Acceptance>, BlockAcquisitionError> {
-        let (maybe_new_state, ret) = match self {
-            BlockAcquisitionState::HaveBlock(
-                block,
-                acquired_signatures,
-                deploy_acquisition,
-                Some(global_state_acq),
-            ) => match global_state_acq.register_put_trie(trie_hash, trie_raw, put_trie_result) {
-                Ok(()) => {
-                    if global_state_acq.is_finished() {
-                        (
-                            Some(BlockAcquisitionState::HaveGlobalState(
-                                block.clone(),
-                                acquired_signatures.clone(),
-                                deploy_acquisition.clone(),
-                                ExecutionResultsAcquisition::Needed {
-                                    block_hash: *block.hash(),
-                                },
-                            )),
-                            Ok(Some(Acceptance::NeededIt)),
-                        )
-                    } else {
-                        (None, Ok(Some(Acceptance::NeededIt)))
-                    }
-                }
-                Err(e) => (None, Err(BlockAcquisitionError::GlobalStateAcquisition(e))),
-            },
-            BlockAcquisitionState::HaveBlock(_, _, _, None)
-            | BlockAcquisitionState::Initialized(_, _)
-            | BlockAcquisitionState::HaveBlockHeader(_, _)
-            | BlockAcquisitionState::HaveWeakFinalitySignatures(_, _)
-            | BlockAcquisitionState::HaveGlobalState(_, _, _, _)
-            | BlockAcquisitionState::HaveAllExecutionResults(_, _, _, _)
-            | BlockAcquisitionState::HaveApprovalsHashes(_, _, _)
-            | BlockAcquisitionState::HaveAllDeploys(_, _)
-            | BlockAcquisitionState::HaveStrictFinalitySignatures(_, _)
-            | BlockAcquisitionState::Failed(_, _) => (None, Ok(None)),
-        };
-
-        if let Some(new_state) = maybe_new_state {
-            self.set_state(new_state);
-        }
-        ret
     }
 
     /// The block height of the current block, if available.
     pub(super) fn block_height(&self) -> Option<u64> {
         match self {
             BlockAcquisitionState::Initialized(..) | BlockAcquisitionState::Failed(..) => None,
-            BlockAcquisitionState::HaveBlockHeader(header, _)
-            | BlockAcquisitionState::HaveWeakFinalitySignatures(header, _) => Some(header.height()),
+            BlockAcquisitionState::HaveBlockHeader {
+                header: block_header,
+                ..
+            }
+            | BlockAcquisitionState::HaveWeakFinalitySignatures(block_header, _) => {
+                Some(block_header.height())
+            }
             BlockAcquisitionState::HaveBlock(block, _, _, _)
             | BlockAcquisitionState::HaveGlobalState(block, ..)
             | BlockAcquisitionState::HaveAllExecutionResults(block, _, _, _)
@@ -553,7 +676,15 @@ impl BlockAcquisitionState {
                         block_hash,
                         header.height()
                     );
-                    BlockAcquisitionState::HaveBlockHeader(Box::new(header), signatures.clone())
+                    let state_root_hash = *header.state_root_hash();
+                    BlockAcquisitionState::HaveBlockHeader {
+                        header: Box::new(header),
+                        acquired_signatures: signatures.clone(),
+                        acquired_block_era_validators:
+                            EraValidatorsAcquisition::new_pending_from_storage(state_root_hash),
+                        acquired_parent_block_era_validators: EraValidatorsAcquisition::new(),
+                        parent_block_header: None,
+                    }
                 } else {
                     return Err(BlockAcquisitionError::BlockHashMismatch {
                         expected: *block_hash,
@@ -563,7 +694,7 @@ impl BlockAcquisitionState {
             }
             // we never ask for a block_header while in the following states,
             // and thus it is erroneous to attempt to apply one
-            BlockAcquisitionState::HaveBlockHeader(..)
+            BlockAcquisitionState::HaveBlockHeader { .. }
             | BlockAcquisitionState::HaveWeakFinalitySignatures(..)
             | BlockAcquisitionState::HaveBlock(..)
             | BlockAcquisitionState::HaveGlobalState(..)
@@ -611,7 +742,7 @@ impl BlockAcquisitionState {
                 )
             }
             BlockAcquisitionState::Initialized(..)
-            | BlockAcquisitionState::HaveBlockHeader(..)
+            | BlockAcquisitionState::HaveBlockHeader { .. }
             | BlockAcquisitionState::HaveBlock(..)
             | BlockAcquisitionState::HaveGlobalState(..)
             | BlockAcquisitionState::HaveAllExecutionResults(..)
@@ -629,7 +760,10 @@ impl BlockAcquisitionState {
     /// Register a finality signature as pending for this block.
     pub(super) fn register_finality_signature_pending(&mut self, validator: PublicKey) {
         match self {
-            BlockAcquisitionState::HaveBlockHeader(_, acquired_signatures)
+            BlockAcquisitionState::HaveBlockHeader {
+                acquired_signatures,
+                ..
+            }
             | BlockAcquisitionState::HaveBlock(_, acquired_signatures, ..)
             | BlockAcquisitionState::HaveGlobalState(_, acquired_signatures, ..)
             | BlockAcquisitionState::HaveApprovalsHashes(_, acquired_signatures, ..)
@@ -659,7 +793,11 @@ impl BlockAcquisitionState {
         let maybe_block_hash: Option<BlockHash>;
         let currently_acquiring_sigs: bool;
         let maybe_new_state: Option<BlockAcquisitionState> = match self {
-            BlockAcquisitionState::HaveBlockHeader(header, acquired_signatures) => {
+            BlockAcquisitionState::HaveBlockHeader {
+                header,
+                acquired_signatures,
+                ..
+            } => {
                 // we are attempting to acquire at least ~1/3 signature weight before
                 // committing to doing non-trivial work to acquire this block
                 // thus the primary thing we are doing in this state is accumulating sigs.
@@ -806,7 +944,7 @@ impl BlockAcquisitionState {
             BlockAcquisitionState::HaveBlock(..)
             | BlockAcquisitionState::HaveGlobalState(..)
             | BlockAcquisitionState::Initialized(..)
-            | BlockAcquisitionState::HaveBlockHeader(..)
+            | BlockAcquisitionState::HaveBlockHeader { .. }
             | BlockAcquisitionState::HaveWeakFinalitySignatures(..)
             | BlockAcquisitionState::HaveAllExecutionResults(..)
             | BlockAcquisitionState::HaveAllDeploys(..)
@@ -820,52 +958,233 @@ impl BlockAcquisitionState {
         Ok(Some(Acceptance::NeededIt))
     }
 
-    /// Register global state for this block.
-    pub(super) fn register_global_state(
+    pub(super) fn register_trie_or_chunk(
         &mut self,
-        root_hash: Digest,
-        need_execution_state: bool,
-    ) -> Result<(), BlockAcquisitionError> {
-        let new_state = match self {
-            BlockAcquisitionState::HaveBlock(block, signatures, deploys, _)
-                if need_execution_state =>
-            {
-                info!(
-                    "BlockAcquisition: registering global state for: {}",
-                    block.hash()
-                );
-                if block.state_root_hash() == &root_hash {
-                    let block_hash = *block.hash();
-                    BlockAcquisitionState::HaveGlobalState(
-                        block.clone(),
-                        signatures.clone(),
-                        deploys.clone(),
-                        ExecutionResultsAcquisition::Needed { block_hash },
-                    )
-                } else {
-                    return Err(BlockAcquisitionError::RootHashMismatch {
-                        expected: *block.state_root_hash(),
-                        actual: root_hash,
-                    });
+        trie_hash: Digest,
+        trie_or_chunk: TrieOrChunk,
+        is_historical: bool,
+    ) -> Result<Option<Acceptance>, BlockAcquisitionError> {
+        match self {
+            BlockAcquisitionState::HaveBlock(_, _, _, Some(global_state_acq)) => {
+                match global_state_acq.register_trie_or_chunk(trie_hash, trie_or_chunk) {
+                    Ok(()) => Ok(Some(Acceptance::NeededIt)),
+                    Err(GlobalStateAcquisitionError::UnexpectedTrieOrChunkRegister(_)) => Ok(None),
+                    Err(e) => Err(BlockAcquisitionError::GlobalStateAcquisition(e)),
                 }
             }
-            // we never ask for global state in the following states, and thus it is erroneous to
-            // attempt to apply any
-            BlockAcquisitionState::HaveBlock(..)
-            | BlockAcquisitionState::Initialized(..)
-            | BlockAcquisitionState::HaveBlockHeader(..)
-            | BlockAcquisitionState::HaveWeakFinalitySignatures(..)
-            | BlockAcquisitionState::HaveGlobalState(..)
-            | BlockAcquisitionState::HaveAllExecutionResults(..)
-            | BlockAcquisitionState::HaveAllDeploys(..)
-            | BlockAcquisitionState::HaveStrictFinalitySignatures(..)
-            | BlockAcquisitionState::HaveApprovalsHashes(..)
-            | BlockAcquisitionState::Failed(..) => {
-                return Ok(());
+            BlockAcquisitionState::HaveBlockHeader { .. } => {
+                // TODO
+                Ok(None)
             }
+            BlockAcquisitionState::HaveBlock(_, _, _, None)
+            | BlockAcquisitionState::Initialized(_, _)
+            | BlockAcquisitionState::HaveWeakFinalitySignatures(_, _)
+            | BlockAcquisitionState::HaveGlobalState(_, _, _, _)
+            | BlockAcquisitionState::HaveAllExecutionResults(_, _, _, _)
+            | BlockAcquisitionState::HaveApprovalsHashes(_, _, _)
+            | BlockAcquisitionState::HaveAllDeploys(_, _)
+            | BlockAcquisitionState::HaveStrictFinalitySignatures(_, _)
+            | BlockAcquisitionState::Failed(_, _) => Ok(None),
+        }
+    }
+
+    pub(super) fn register_trie_or_chunk_fetch_error(
+        &mut self,
+        trie_hash: Digest,
+    ) -> Result<Option<Acceptance>, BlockAcquisitionError> {
+        match self {
+            BlockAcquisitionState::HaveBlock(_, _, _, Some(global_state_acq)) => {
+                match global_state_acq.register_trie_or_chunk_fetch_error(trie_hash) {
+                    Ok(()) => Ok(Some(Acceptance::NeededIt)),
+                    Err(GlobalStateAcquisitionError::UnexpectedTrieOrChunkRegister(_)) => Ok(None),
+                    Err(e) => Err(BlockAcquisitionError::GlobalStateAcquisition(e)),
+                }
+            }
+            BlockAcquisitionState::HaveBlockHeader { .. } => {
+                // TODO
+                Ok(None)
+            }
+            BlockAcquisitionState::HaveBlock(_, _, _, None)
+            | BlockAcquisitionState::Initialized(_, _)
+            | BlockAcquisitionState::HaveWeakFinalitySignatures(_, _)
+            | BlockAcquisitionState::HaveGlobalState(_, _, _, _)
+            | BlockAcquisitionState::HaveAllExecutionResults(_, _, _, _)
+            | BlockAcquisitionState::HaveApprovalsHashes(_, _, _)
+            | BlockAcquisitionState::HaveAllDeploys(_, _)
+            | BlockAcquisitionState::HaveStrictFinalitySignatures(_, _)
+            | BlockAcquisitionState::Failed(_, _) => Ok(None),
+        }
+    }
+
+    pub(super) fn register_put_trie(
+        &mut self,
+        trie_hash: Digest,
+        trie_raw: TrieRaw,
+        put_trie_result: Result<Digest, engine_state::Error>,
+    ) -> Result<Option<Acceptance>, BlockAcquisitionError> {
+        let (maybe_new_state, acceptance) = match self {
+            BlockAcquisitionState::HaveBlock(
+                block,
+                acquired_signatures,
+                deploy_acquisition,
+                Some(global_state_acq),
+            ) => {
+                let acceptance = match global_state_acq.register_put_trie(
+                    trie_hash,
+                    trie_raw,
+                    put_trie_result,
+                ) {
+                    Ok(()) => Ok(Some(Acceptance::NeededIt)),
+                    Err(GlobalStateAcquisitionError::UnexpectedTrieOrChunkRegister(_)) => Ok(None),
+                    Err(e) => Err(BlockAcquisitionError::GlobalStateAcquisition(e)),
+                };
+
+                let maybe_new_state = global_state_acq.is_finished().then(|| {
+                    BlockAcquisitionState::HaveGlobalState(
+                        block.clone(),
+                        acquired_signatures.clone(),
+                        deploy_acquisition.clone(),
+                        ExecutionResultsAcquisition::Needed {
+                            block_hash: *block.hash(),
+                        },
+                    )
+                });
+
+                (maybe_new_state, acceptance)
+            }
+            BlockAcquisitionState::HaveBlockHeader { .. } => {
+                //TODO
+                (None, Ok(None))
+            }
+            BlockAcquisitionState::HaveBlock(_, _, _, None)
+            | BlockAcquisitionState::Initialized(_, _)
+            | BlockAcquisitionState::HaveWeakFinalitySignatures(_, _)
+            | BlockAcquisitionState::HaveGlobalState(_, _, _, _)
+            | BlockAcquisitionState::HaveAllExecutionResults(_, _, _, _)
+            | BlockAcquisitionState::HaveApprovalsHashes(_, _, _)
+            | BlockAcquisitionState::HaveAllDeploys(_, _)
+            | BlockAcquisitionState::HaveStrictFinalitySignatures(_, _)
+            | BlockAcquisitionState::Failed(_, _) => (None, Ok(None)),
         };
-        self.set_state(new_state);
-        Ok(())
+
+        if let Some(new_state) = maybe_new_state {
+            self.set_state(new_state);
+        }
+
+        acceptance
+    }
+
+    pub(super) fn register_block_header_requested_from_storage(
+        &mut self,
+        block_header: Option<BlockHeader>,
+    ) -> Result<Option<Acceptance>, BlockAcquisitionError> {
+        match self {
+            BlockAcquisitionState::HaveBlockHeader {
+                parent_block_header,
+                acquired_parent_block_era_validators,
+                ..
+            } => {
+                if let Some(header) = block_header {
+                    if parent_block_header.is_some() {
+                        Ok(Some(Acceptance::HadIt))
+                    } else {
+                        let state_root_hash = *header.state_root_hash();
+                        parent_block_header.insert(header);
+                        *acquired_parent_block_era_validators = EraValidatorsAcquisition::new_pending_from_storage(state_root_hash);
+                        Ok(Some(Acceptance::NeededIt))
+                    }
+                } else {
+                    Err(BlockAcquisitionError::BlockHeaderMissing)
+                }
+            }
+            BlockAcquisitionState::HaveBlock(_, _, _, _)
+            | BlockAcquisitionState::Initialized(_, _)
+            | BlockAcquisitionState::HaveWeakFinalitySignatures(_, _)
+            | BlockAcquisitionState::HaveGlobalState(_, _, _, _)
+            | BlockAcquisitionState::HaveAllExecutionResults(_, _, _, _)
+            | BlockAcquisitionState::HaveApprovalsHashes(_, _, _)
+            | BlockAcquisitionState::HaveAllDeploys(_, _)
+            | BlockAcquisitionState::HaveStrictFinalitySignatures(_, _)
+            | BlockAcquisitionState::Failed(_, _) => Ok(None),
+        }
+    }
+
+    fn update_era_validators_for_acquisition(
+        era_validators_acquisition: &mut EraValidatorsAcquisition,
+        state_hash: &Digest,
+        era_validators_get_result: Result<EraValidators, EraValidatorsGetError>,
+    ) -> Result<Option<Acceptance>, BlockAcquisitionError> {
+        match era_validators_get_result {
+            Ok(era_validators) => {
+                match era_validators_acquisition
+                    .clone()
+                    .register_era_validators(state_hash, era_validators)
+                {
+                    Ok(block_era_validators) => {
+                        *era_validators_acquisition = block_era_validators;
+                        Ok(Some(Acceptance::NeededIt))
+                    }
+                    Err(EraValidatorsAcquisitionError::AlreadyComplete) => {
+                        Ok(Some(Acceptance::HadIt))
+                    }
+                    Err(EraValidatorsAcquisitionError::NotAcquiring { .. }) => Ok(None),
+                    Err(e) => Err(BlockAcquisitionError::EraValidatorsAcquisition(e)),
+                }
+            }
+            Err(EraValidatorsGetError::RootNotFound) => {
+                *era_validators_acquisition = EraValidatorsAcquisition::PendingGlobalState {
+                    global_state_acquisition: Box::new(GlobalStateAcquisition::new(state_hash)),
+                };
+                Ok(Some(Acceptance::NeededIt))
+            }
+            Err(_) => Err(BlockAcquisitionError::MissingEraValidatorWeights),
+        }
+    }
+
+    pub(super) fn register_era_validators_from_contract_runtime(
+        &mut self,
+        from_state_root_hash: Digest,
+        era_validators_get_result: Result<EraValidators, EraValidatorsGetError>,
+    ) -> Result<Option<Acceptance>, BlockAcquisitionError> {
+        match self {
+            BlockAcquisitionState::HaveBlockHeader {
+                acquired_block_era_validators,
+                acquired_parent_block_era_validators,
+                ..
+            } => {
+                match (
+                    acquired_block_era_validators
+                        .is_acquiring_from_root_hash(&from_state_root_hash),
+                    acquired_parent_block_era_validators
+                        .is_acquiring_from_root_hash(&from_state_root_hash),
+                ) {
+                    (true, true) => {
+                        // TODO: Error out here
+                        Ok(Some(Acceptance::HadIt))
+                    }
+                    (true, false) => Self::update_era_validators_for_acquisition(
+                        acquired_block_era_validators,
+                        &from_state_root_hash,
+                        era_validators_get_result,
+                    ),
+                    (false, true) => Self::update_era_validators_for_acquisition(
+                        acquired_parent_block_era_validators,
+                        &from_state_root_hash,
+                        era_validators_get_result,
+                    ),
+                    (false, false) => Ok(None),
+                }
+            }
+            BlockAcquisitionState::HaveBlock(_, _, _, _)
+            | BlockAcquisitionState::Initialized(_, _)
+            | BlockAcquisitionState::HaveWeakFinalitySignatures(_, _)
+            | BlockAcquisitionState::HaveGlobalState(_, _, _, _)
+            | BlockAcquisitionState::HaveAllExecutionResults(_, _, _, _)
+            | BlockAcquisitionState::HaveApprovalsHashes(_, _, _)
+            | BlockAcquisitionState::HaveAllDeploys(_, _)
+            | BlockAcquisitionState::HaveStrictFinalitySignatures(_, _)
+            | BlockAcquisitionState::Failed(_, _) => Ok(None),
+        }
     }
 
     /// Register execution results checksum for this block.
@@ -895,7 +1214,7 @@ impl BlockAcquisitionState {
             | BlockAcquisitionState::HaveGlobalState(..)
             | BlockAcquisitionState::HaveBlock(..)
             | BlockAcquisitionState::Initialized(..)
-            | BlockAcquisitionState::HaveBlockHeader(..)
+            | BlockAcquisitionState::HaveBlockHeader { .. }
             | BlockAcquisitionState::HaveWeakFinalitySignatures(..)
             | BlockAcquisitionState::HaveAllExecutionResults(..)
             | BlockAcquisitionState::HaveStrictFinalitySignatures(..)
@@ -976,7 +1295,7 @@ impl BlockAcquisitionState {
             | BlockAcquisitionState::HaveGlobalState(..)
             | BlockAcquisitionState::HaveBlock(..)
             | BlockAcquisitionState::Initialized(..)
-            | BlockAcquisitionState::HaveBlockHeader(..)
+            | BlockAcquisitionState::HaveBlockHeader { .. }
             | BlockAcquisitionState::HaveWeakFinalitySignatures(..)
             | BlockAcquisitionState::HaveAllExecutionResults(..)
             | BlockAcquisitionState::HaveStrictFinalitySignatures(..)
@@ -1016,7 +1335,7 @@ impl BlockAcquisitionState {
             | BlockAcquisitionState::HaveAllDeploys(..)
             | BlockAcquisitionState::HaveBlock(..)
             | BlockAcquisitionState::Initialized(..)
-            | BlockAcquisitionState::HaveBlockHeader(..)
+            | BlockAcquisitionState::HaveBlockHeader { .. }
             | BlockAcquisitionState::HaveWeakFinalitySignatures(..)
             | BlockAcquisitionState::HaveAllExecutionResults(..)
             | BlockAcquisitionState::HaveStrictFinalitySignatures(..)
@@ -1056,7 +1375,7 @@ impl BlockAcquisitionState {
                 }
             },
             BlockAcquisitionState::Initialized(_, _)
-            | BlockAcquisitionState::HaveBlockHeader(_, _)
+            | BlockAcquisitionState::HaveBlockHeader { .. }
             | BlockAcquisitionState::HaveWeakFinalitySignatures(_, _)
             | BlockAcquisitionState::HaveBlock(_, _, _, _)
             | BlockAcquisitionState::HaveGlobalState(_, _, _, _)
@@ -1118,7 +1437,7 @@ impl BlockAcquisitionState {
 
             BlockAcquisitionState::Initialized(..)
             | BlockAcquisitionState::HaveWeakFinalitySignatures(..)
-            | BlockAcquisitionState::HaveBlockHeader(..)
+            | BlockAcquisitionState::HaveBlockHeader { .. }
             | BlockAcquisitionState::HaveBlock(..)
             | BlockAcquisitionState::HaveGlobalState(..)
             | BlockAcquisitionState::HaveAllExecutionResults(..)
@@ -1182,7 +1501,7 @@ impl BlockAcquisitionState {
 
             BlockAcquisitionState::Initialized(..)
             | BlockAcquisitionState::HaveWeakFinalitySignatures(..)
-            | BlockAcquisitionState::HaveBlockHeader(..)
+            | BlockAcquisitionState::HaveBlockHeader { .. }
             | BlockAcquisitionState::HaveBlock(..)
             | BlockAcquisitionState::HaveGlobalState(..)
             | BlockAcquisitionState::HaveAllExecutionResults(..)

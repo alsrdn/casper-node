@@ -12,11 +12,13 @@ use datasize::DataSize;
 use tracing::{debug, error, trace, warn};
 
 use casper_hashing::Digest;
-use casper_types::{EraId, PublicKey, TimeDiff, Timestamp};
+use casper_types::{system::auction::EraValidators, EraId, PublicKey, TimeDiff, Timestamp};
 
 use super::{
     block_acquisition::{Acceptance, BlockAcquisitionState},
     block_acquisition_action::BlockAcquisitionAction,
+    era_validators_acquisition::EraValidatorsAcquisition,
+    event::EraValidatorsGetError,
     execution_results_acquisition::{self, ExecutionResultsChecksum},
     peer_list::{PeerList, PeersStatus},
     signature_acquisition::SignatureAcquisition,
@@ -26,7 +28,7 @@ use crate::{
     types::{
         ApprovalsHashes, Block, BlockExecutionResultsOrChunk, BlockHash, BlockHeader,
         BlockSignatures, DeployHash, DeployId, EraValidatorWeights, FinalitySignature, NodeId,
-        TrieOrChunk, ValidatorMatrix,
+        TrieOrChunk, TrieOrChunkId, ValidatorMatrix,
     },
     NodeRng,
 };
@@ -78,6 +80,7 @@ pub(super) struct BlockBuilder {
     should_fetch_execution_state: bool,
     requires_strict_finality: bool,
     peer_list: PeerList,
+    get_evw_from_global_state: bool,
 
     // progress tracking
     sync_start: Instant,
@@ -110,7 +113,7 @@ impl BlockBuilder {
         requires_strict_finality: bool,
         max_simultaneous_peers: u32,
         peer_refresh_interval: TimeDiff,
-        max_parallel_trie_fetches: usize,
+        get_evw_from_global_state: bool,
     ) -> Self {
         BlockBuilder {
             block_hash,
@@ -127,6 +130,7 @@ impl BlockBuilder {
             execution_progress: ExecutionProgress::Idle,
             last_progress: Timestamp::now(),
             in_flight_latch: None,
+            get_evw_from_global_state,
         }
     }
 
@@ -172,6 +176,7 @@ impl BlockBuilder {
             execution_progress: ExecutionProgress::Idle,
             last_progress: Timestamp::now(),
             in_flight_latch: None,
+            get_evw_from_global_state: false,
         }
     }
 
@@ -228,7 +233,7 @@ impl BlockBuilder {
             // if latch_reset_interval has passed, we reset the latch and ask again.
 
             // !todo move reset interval to config
-            let latch_reset_interval = TimeDiff::from_seconds(5);
+            let latch_reset_interval = TimeDiff::from_seconds(50000);
             if Timestamp::now().saturating_diff(timestamp) > latch_reset_interval {
                 self.in_flight_latch = None;
             }
@@ -350,6 +355,7 @@ impl BlockBuilder {
         &mut self,
         rng: &mut NodeRng,
         max_simultaneous_peers: usize,
+        max_parallel_trie_fetches: usize,
     ) -> BlockAcquisitionAction {
         match self.peer_list.need_peers() {
             PeersStatus::Sufficient => {
@@ -378,9 +384,13 @@ impl BlockBuilder {
         };
         let validator_weights = match &self.validator_weights {
             None => {
-                return BlockAcquisitionAction::era_validators(era_id);
+                if self.should_fetch_execution_state() && self.get_evw_from_global_state {
+                    None
+                } else {
+                    return BlockAcquisitionAction::era_validators(era_id);
+                }
             }
-            Some(validator_weights) => validator_weights,
+            Some(validator_weights) => Some(validator_weights),
         };
         match self.acquisition_state.next_action(
             &self.peer_list,
@@ -388,6 +398,7 @@ impl BlockBuilder {
             rng,
             self.should_fetch_execution_state,
             max_simultaneous_peers,
+            max_parallel_trie_fetches,
         ) {
             Ok(ret) => ret,
             Err(err) => {
@@ -466,15 +477,58 @@ impl BlockBuilder {
         self.handle_acceptance(maybe_peer, acceptance)
     }
 
-    pub(super) fn register_global_state(&mut self, global_state: Digest) -> Result<(), Error> {
-        if let Err(error) = self
+    pub(super) fn register_trie_or_chunk(
+        &mut self,
+        trie_hash: Digest,
+        trie_or_chunk: TrieOrChunk,
+        maybe_peer: Option<NodeId>,
+    ) -> Result<(), Error> {
+        let acceptance = self.acquisition_state.register_trie_or_chunk(
+            trie_hash,
+            trie_or_chunk,
+            self.should_fetch_execution_state,
+        );
+        self.handle_acceptance(maybe_peer, acceptance)
+    }
+
+    pub(super) fn register_trie_fetch_error(&mut self, trie_hash: Digest) -> Result<(), Error> {
+        let acceptance = self
             .acquisition_state
-            .register_global_state(global_state, self.should_fetch_execution_state)
-        {
-            return Err(Error::BlockAcquisition(error));
-        }
-        self.touch();
-        Ok(())
+            .register_trie_or_chunk_fetch_error(trie_hash);
+        self.handle_acceptance(None, acceptance)
+    }
+
+    pub(super) fn register_put_trie(
+        &mut self,
+        trie_hash: Digest,
+        trie_raw: TrieRaw,
+        put_trie_result: Result<Digest, engine_state::Error>,
+    ) -> Result<(), Error> {
+        let acceptance =
+            self.acquisition_state
+                .register_put_trie(trie_hash, trie_raw, put_trie_result);
+        self.handle_acceptance(None, acceptance)
+    }
+
+    pub(super) fn register_block_header_requested_from_storage(
+        &mut self,
+        block_header: Option<BlockHeader>,
+    ) -> Result<(), Error> {
+        let acceptance = self
+            .acquisition_state
+            .register_block_header_requested_from_storage(block_header);
+        self.handle_acceptance(None, acceptance)
+    }
+
+    pub(super) fn register_era_validators_from_contract_runtime(
+        &mut self,
+        from_state_root_hash: Digest,
+        era_validators: Result<EraValidators, EraValidatorsGetError>,
+    ) -> Result<(), Error> {
+        let acceptance = self
+            .acquisition_state
+            .register_era_validators_from_contract_runtime(from_state_root_hash, era_validators);
+        self.handle_acceptance(None, acceptance)
     }
 
     pub(super) fn register_execution_results_checksum(
@@ -585,27 +639,9 @@ impl BlockBuilder {
             .register_pending_trie_fetches(trie_fetches_in_progress);
     }
 
-    pub(super) fn register_trie_or_chunk(
-        &mut self,
-        trie_or_chunk: TrieOrChunk,
-        maybe_peer: Option<NodeId>,
-    ) -> Result<(), Error> {
-        let acceptance = self
-            .acquisition_state
-            .register_trie_or_chunk(trie_or_chunk, self.should_fetch_execution_state);
-        self.handle_acceptance(maybe_peer, acceptance)
-    }
-
-    pub(super) fn register_put_trie(
-        &mut self,
-        trie_hash: Digest,
-        trie_raw: TrieRaw,
-        put_trie_result: Result<Digest, engine_state::Error>,
-    ) -> Result<(), Error> {
-        let acceptance =
-            self.acquisition_state
-                .register_put_trie(trie_hash, trie_raw, put_trie_result);
-        self.handle_acceptance(None, acceptance)
+    pub(super) fn register_pending_put_tries(&mut self, put_tries_in_progress: HashSet<Digest>) {
+        self.acquisition_state
+            .register_pending_put_tries(put_tries_in_progress);
     }
 
     pub(super) fn register_deploy(

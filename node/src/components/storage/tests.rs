@@ -510,6 +510,7 @@ fn read_block_by_height_with_available_block_range() {
         ProtocolVersion::from_parts(1, 5, 0),
         true,
         None,
+        None,
     ));
 
     let mut storage = storage_fixture(&harness);
@@ -536,6 +537,7 @@ fn read_block_by_height_with_available_block_range() {
         ProtocolVersion::from_parts(1, 5, 0),
         false,
         None,
+        None,
     ));
 
     let was_new = put_complete_block(&mut harness, &mut storage, block_14.clone());
@@ -560,6 +562,7 @@ fn can_retrieve_block_by_height() {
         ProtocolVersion::from_parts(1, 5, 0),
         true,
         None,
+        None,
     ));
     let block_14 = Arc::new(Block::random_with_specifics(
         &mut harness.rng,
@@ -568,6 +571,7 @@ fn can_retrieve_block_by_height() {
         ProtocolVersion::from_parts(1, 5, 0),
         false,
         None,
+        None,
     ));
     let block_99 = Arc::new(Block::random_with_specifics(
         &mut harness.rng,
@@ -575,6 +579,7 @@ fn can_retrieve_block_by_height() {
         99,
         ProtocolVersion::from_parts(1, 5, 0),
         true,
+        None,
         None,
     ));
 
@@ -712,6 +717,7 @@ fn different_block_at_height_is_fatal() {
         ProtocolVersion::V1_0_0,
         false,
         None,
+        None,
     ));
     let block_44_b = Arc::new(Block::random_with_specifics(
         &mut harness.rng,
@@ -719,6 +725,7 @@ fn different_block_at_height_is_fatal() {
         44,
         ProtocolVersion::V1_0_0,
         false,
+        None,
         None,
     ));
 
@@ -1174,6 +1181,7 @@ fn should_hard_reset() {
                 ProtocolVersion::V1_0_0,
                 is_switch,
                 iter::once(random_deploys.get(height).expect("should_have_deploy")),
+                None,
             )
         })
         .collect();
@@ -1635,6 +1643,7 @@ fn should_restrict_returned_blocks() {
             *height,
             ProtocolVersion::from_parts(1, 5, 0),
             false,
+            None,
             None,
         );
         storage.write_block(&block).unwrap();

@@ -172,6 +172,7 @@ mod tests {
             ProtocolVersion::default(),
             false,
             None,
+            None,
         )
     }
 
