@@ -42,6 +42,7 @@ enum MockReactorEvent {
     ContractRuntimeRequest(ContractRuntimeRequest),
     MakeBlockExecutableRequest(MakeBlockExecutableRequest),
     MetaBlockAnnouncement(MetaBlockAnnouncement),
+    UpdateEraValidatorsRequest(UpdateEraValidatorsRequest),
 }
 
 impl From<FetcherRequest<ApprovalsHashes>> for MockReactorEvent {
@@ -222,7 +223,7 @@ async fn trie_fetch_error_retriggers_fetch_for_same_trie() {
         id: expected_trie_or_chunk,
         peer: selected_peer,
     });
-    block_synchronizer.trie_or_chunk_fetched(*block.hash(), *block.state_root_hash(), fetch_result);
+    block_synchronizer.trie_or_chunk_fetched(*block.hash(), *block.state_root_hash(), *block.state_root_hash(), fetch_result);
     let event = need_next(&mut rng, &mock_reactor, &mut block_synchronizer, 1)
         .await
         .remove(0);
@@ -247,7 +248,7 @@ async fn trie_fetch_error_retriggers_fetch_for_same_trie() {
         peer,
         item: trie_or_chunk,
     });
-    block_synchronizer.trie_or_chunk_fetched(*block.hash(), *block.state_root_hash(), fetch_result);
+    block_synchronizer.trie_or_chunk_fetched(*block.hash(), *block.state_root_hash(), *block.state_root_hash(), fetch_result);
     let event = need_next(&mut rng, &mock_reactor, &mut block_synchronizer, 1)
         .await
         .remove(0);
@@ -261,6 +262,7 @@ async fn trie_fetch_error_retriggers_fetch_for_same_trie() {
 
     // Check if global state acquisition is finished
     block_synchronizer.put_trie_result(
+        *block.state_root_hash(),
         *block.state_root_hash(),
         trie_to_put,
         Ok(*block.state_root_hash()),
@@ -307,7 +309,7 @@ async fn global_state_sync_with_multiple_tries() {
         peer,
         item: trie_or_chunk,
     });
-    block_synchronizer.trie_or_chunk_fetched(*block.hash(), *block.state_root_hash(), fetch_result);
+    block_synchronizer.trie_or_chunk_fetched(*block.hash(), *block.state_root_hash(), *block.state_root_hash(), fetch_result);
 
     // Check that the peer was marked as reliable
     let peer_list = block_synchronizer.historical.as_ref().unwrap().peer_list();
@@ -335,6 +337,7 @@ async fn global_state_sync_with_multiple_tries() {
         .collect();
     block_synchronizer.put_trie_result(
         *block.state_root_hash(),
+        *block.state_root_hash(),
         root_trie.clone(),
         Err(engine_state::Error::MissingTrieNodeChildren(
             missing_trie_nodes_hashes.clone(),
@@ -355,7 +358,7 @@ async fn global_state_sync_with_multiple_tries() {
             peer,
             item: trie_or_chunk,
         });
-        block_synchronizer.trie_or_chunk_fetched(*block.hash(), *hash, fetch_result);
+        block_synchronizer.trie_or_chunk_fetched(*block.hash(), *block.state_root_hash(), *hash, fetch_result);
         let event = need_next(&mut rng, &mock_reactor, &mut block_synchronizer, 1)
             .await
             .remove(0);
@@ -366,7 +369,7 @@ async fn global_state_sync_with_multiple_tries() {
             })
         });
         // Check if global state acquisition is finished
-        block_synchronizer.put_trie_result(*hash, trie_to_put, Ok(*hash));
+        block_synchronizer.put_trie_result(*block.state_root_hash(), *hash, trie_to_put, Ok(*hash));
 
         if idx < 4 {
             need_next(&mut rng, &mock_reactor, &mut block_synchronizer, 0).await;
@@ -381,6 +384,7 @@ async fn global_state_sync_with_multiple_tries() {
     }
 
     block_synchronizer.put_trie_result(
+        *block.state_root_hash(),
         *block.state_root_hash(),
         root_trie.clone(),
         Ok(*block.state_root_hash()),
@@ -426,7 +430,7 @@ async fn global_state_sync_multi_chunk_tries_successful() {
         peer: selected_peer,
         item: trie_or_chunk,
     });
-    block_synchronizer.trie_or_chunk_fetched(*block.hash(), *block.state_root_hash(), fetch_result);
+    block_synchronizer.trie_or_chunk_fetched(*block.hash(), *block.state_root_hash(), *block.state_root_hash(), fetch_result);
 
     // Expect to get a request to fetch the next chunk of the trie (chunk 1)
     let event = need_next(&mut rng, &mock_reactor, &mut block_synchronizer, 1)
@@ -445,7 +449,7 @@ async fn global_state_sync_multi_chunk_tries_successful() {
         peer: selected_peer,
         item: trie_or_chunk,
     });
-    block_synchronizer.trie_or_chunk_fetched(*block.hash(), *block.state_root_hash(), fetch_result);
+    block_synchronizer.trie_or_chunk_fetched(*block.hash(), *block.state_root_hash(), *block.state_root_hash(), fetch_result);
 
     let event = need_next(&mut rng, &mock_reactor, &mut block_synchronizer, 1)
         .await
@@ -487,7 +491,7 @@ async fn duplicate_global_state_trie_chunk_fetch_does_not_stall_acquisition() {
         peer: selected_peer,
         item: trie_or_chunk,
     });
-    block_synchronizer.trie_or_chunk_fetched(*block.hash(), *block.state_root_hash(), fetch_result);
+    block_synchronizer.trie_or_chunk_fetched(*block.hash(), *block.state_root_hash(), *block.state_root_hash(), fetch_result);
 
     // Expect to get a request to fetch the next chunk of the trie (chunk 1)
     let event = need_next(&mut rng, &mock_reactor, &mut block_synchronizer, 1)
@@ -506,7 +510,7 @@ async fn duplicate_global_state_trie_chunk_fetch_does_not_stall_acquisition() {
         peer: selected_peer,
         item: trie_or_chunk,
     });
-    block_synchronizer.trie_or_chunk_fetched(*block.hash(), *block.state_root_hash(), fetch_result);
+    block_synchronizer.trie_or_chunk_fetched(*block.hash(), *block.state_root_hash(), *block.state_root_hash(), fetch_result);
 
     // Expect to get a request to fetch chunk 1 again
     let event = need_next(&mut rng, &mock_reactor, &mut block_synchronizer, 1)
@@ -548,7 +552,7 @@ async fn global_state_trie_fetch_validation_programming_error_aborts_historical_
         peer: selected_peer,
         item: trie_or_chunk,
     });
-    block_synchronizer.trie_or_chunk_fetched(*block.hash(), *block.state_root_hash(), fetch_result);
+    block_synchronizer.trie_or_chunk_fetched(*block.hash(), *block.state_root_hash(), *block.state_root_hash(), fetch_result);
 
     // Expect to get a request to fetch chunk 1
     let event = need_next(&mut rng, &mock_reactor, &mut block_synchronizer, 1)
@@ -577,7 +581,7 @@ async fn global_state_trie_fetch_validation_programming_error_aborts_historical_
         peer: selected_peer,
         item: trie_or_chunk,
     });
-    block_synchronizer.trie_or_chunk_fetched(*block.hash(), *block.state_root_hash(), fetch_result);
+    block_synchronizer.trie_or_chunk_fetched(*block.hash(), *block.state_root_hash(), *block.state_root_hash(), fetch_result);
 
     let historical_builder = block_synchronizer.historical.as_ref().unwrap();
     assert_matches!(
@@ -619,6 +623,7 @@ async fn peers_refreshed_when_repeatedly_failing_to_fetch_global_state() {
         block_synchronizer.trie_or_chunk_fetched(
             *block.hash(),
             *block.state_root_hash(),
+            *block.state_root_hash(),
             fetch_result,
         );
 
@@ -648,7 +653,7 @@ async fn peers_refreshed_when_repeatedly_failing_to_fetch_global_state() {
         id: expected_trie_or_chunk,
         peer: selected_peer,
     });
-    block_synchronizer.trie_or_chunk_fetched(*block.hash(), *block.state_root_hash(), fetch_result);
+    block_synchronizer.trie_or_chunk_fetched(*block.hash(), *block.state_root_hash(), *block.state_root_hash(), fetch_result);
 
     // Wait for peer refresh interval to elapse
     std::thread::sleep(Duration::from_secs(10));
@@ -711,7 +716,7 @@ async fn global_state_sync_does_not_exceed_maximum_parallel_trie_fetches() {
         peer,
         item: trie_or_chunk,
     });
-    block_synchronizer.trie_or_chunk_fetched(*block.hash(), *block.state_root_hash(), fetch_result);
+    block_synchronizer.trie_or_chunk_fetched(*block.hash(), *block.state_root_hash(), *block.state_root_hash(), fetch_result);
 
     // Check that the peer was marked as reliable
     let peer_list = block_synchronizer.historical.as_ref().unwrap().peer_list();
@@ -739,6 +744,7 @@ async fn global_state_sync_does_not_exceed_maximum_parallel_trie_fetches() {
         .collect();
     block_synchronizer.put_trie_result(
         *block.state_root_hash(),
+        *block.state_root_hash(),
         root_trie.clone(),
         Err(engine_state::Error::MissingTrieNodeChildren(
             missing_trie_nodes_hashes.clone(),
@@ -759,7 +765,7 @@ async fn sync_validator_weights_from_global_state() {
     // Set up a validator matrix for the era in which our test block was created
     let mut validator_matrix = ValidatorMatrix::new_with_validator(ALICE_SECRET_KEY.clone());
     validator_matrix.register_validator_weights(
-        EraId::from(5),
+        EraId::from(2),
         iter::once((ALICE_PUBLIC_KEY.clone(), 100.into())).collect(),
     );
 
@@ -836,12 +842,12 @@ async fn sync_validator_weights_from_global_state() {
         })
     });
 
-    let era_4_validator_weights: ValidatorWeights = BTreeMap::from([
+    let era_validator_weights: ValidatorWeights = BTreeMap::from([
         (BOB_PUBLIC_KEY.clone(), 100.into()),
         (CAROL_PUBLIC_KEY.clone(), 200.into()),
     ]);
     let era_validators_get_response =
-        Ok(BTreeMap::from([(EraId::from(4), era_4_validator_weights)]));
+        Ok(BTreeMap::from([(EraId::from(5), era_validator_weights.clone()), (EraId::from(6), era_validator_weights)]));
     block_synchronizer.register_era_validators_from_contract_runtime(
         *block.state_root_hash(),
         era_validators_get_response,
@@ -895,14 +901,56 @@ async fn sync_validator_weights_from_global_state() {
         peer: selected_peer,
         item: trie_or_chunk,
     });
-    block_synchronizer.trie_or_chunk_fetched(*block.hash(), *parent_block.state_root_hash(), fetch_result);
+    block_synchronizer.trie_or_chunk_fetched(*block.hash(), *parent_block.state_root_hash(), *parent_block.state_root_hash(), fetch_result);
 
     // Expect to get a request to fetch chunk 1
     let event = need_next(&mut rng, &mock_reactor, &mut block_synchronizer, 1)
         .await
         .remove(0);
 
-    println!("Ev: {:#?}", event);
+    // Now the global state acquisition logic will want to store the trie
+    let trie_to_put = assert_matches!(event, MockReactorEvent::ContractRuntimeRequest(req) => {
+        assert_matches!(req, ContractRuntimeRequest::PutTrie { trie_bytes, responder: _ } => {
+            trie_bytes
+        })
+    });
+
+    // Check if global state acquisition is finished
+    block_synchronizer.put_trie_result(
+        *parent_block.state_root_hash(),
+        *parent_block.state_root_hash(),
+        trie_to_put,
+        Ok(*block.state_root_hash()),
+    );
+    let event = need_next(&mut rng, &mock_reactor, &mut block_synchronizer, 1)
+        .await
+        .remove(0);
+
+    let era_4_validator_weights: ValidatorWeights = BTreeMap::from([
+        (BOB_PUBLIC_KEY.clone(), 100.into()),
+        (CAROL_PUBLIC_KEY.clone(), 200.into()),
+    ]);
+    let era_validators_get_response =
+        Ok(BTreeMap::from([(EraId::from(4), era_4_validator_weights.clone()), (EraId::from(5), era_4_validator_weights)]));
+    block_synchronizer.register_era_validators_from_contract_runtime(
+        *parent_block.state_root_hash(),
+        era_validators_get_response,
+    );
+
+    let mut effects = block_synchronizer.need_next(mock_reactor.effect_builder(), &mut rng);
+    assert_eq!(effects.len(), 2);
+
+    tokio::spawn(async move { effects.remove(0).await });
+    let event = mock_reactor.crank().await;
+
+    assert_matches!(event, MockReactorEvent::UpdateEraValidatorsRequest(req) => {
+        assert_matches!(req, UpdateEraValidatorsRequest {era_id, .. } => {
+            assert_eq!(era_id, EraId::from(4));
+            //TODO check weights
+        })
+    });
+
+    //println!("Ev: {:#?}", event);
     //assert_matches!(event, MockReactorEvent::BlockHeaderFetcherRequest(req) if req.id ==
     // *block.hash());
 

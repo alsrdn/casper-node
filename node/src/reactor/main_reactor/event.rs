@@ -3,7 +3,7 @@ use std::fmt::{self, Debug, Display, Formatter};
 use derive_more::From;
 use serde::Serialize;
 
-use casper_types::{system::auction::EraValidators, EraId};
+use casper_types::{system::auction::{EraValidators, ValidatorWeights}, EraId};
 
 use crate::{
     components::{
@@ -35,7 +35,7 @@ use crate::{
             ConsensusRequest, ContractRuntimeRequest, DeployBufferRequest, FetcherRequest,
             MakeBlockExecutableRequest, MetricsRequest, NetworkInfoRequest, NetworkRequest,
             ReactorStatusRequest, RestRequest, RpcRequest, SetNodeStopRequest, StorageRequest,
-            UpgradeWatcherRequest,
+            UpgradeWatcherRequest, UpdateEraValidatorsRequest,
         },
     },
     protocol::Message,
@@ -238,7 +238,8 @@ pub(crate) enum MainEvent {
     UnexecutedBlockAnnouncement(UnexecutedBlockAnnouncement),
 
     // Event related to figuring out validators for immediate switch blocks.
-    GotImmediateSwitchBlockEraValidators(EraId, EraValidators, EraValidators),
+    #[from]
+    UpdateEraValidatorsRequest(UpdateEraValidatorsRequest),
 }
 
 impl ReactorEvent for MainEvent {
@@ -351,9 +352,7 @@ impl ReactorEvent for MainEvent {
             MainEvent::MakeBlockExecutableRequest(_) => "MakeBlockExecutableRequest",
             MainEvent::MetaBlockAnnouncement(_) => "MetaBlockAnnouncement",
             MainEvent::UnexecutedBlockAnnouncement(_) => "UnexecutedBlockAnnouncement",
-            MainEvent::GotImmediateSwitchBlockEraValidators(_, _, _) => {
-                "GotImmediateSwitchBlockEraValidators"
-            }
+            MainEvent::UpdateEraValidatorsRequest(_) => "UpdateEraValidatorsRequest",
         }
     }
 }
@@ -533,13 +532,7 @@ impl Display for MainEvent {
             MainEvent::MakeBlockExecutableRequest(inner) => Display::fmt(inner, f),
             MainEvent::MetaBlockAnnouncement(inner) => Display::fmt(inner, f),
             MainEvent::UnexecutedBlockAnnouncement(inner) => Display::fmt(inner, f),
-            MainEvent::GotImmediateSwitchBlockEraValidators(era_id, _, _) => {
-                write!(
-                    f,
-                    "got immediate switch block era validators for era {}",
-                    era_id
-                )
-            }
+            MainEvent::UpdateEraValidatorsRequest(inner) => Display::fmt(inner, f),
         }
     }
 }

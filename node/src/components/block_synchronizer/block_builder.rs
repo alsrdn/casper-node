@@ -479,11 +479,13 @@ impl BlockBuilder {
 
     pub(super) fn register_trie_or_chunk(
         &mut self,
+        state_root_hash: Digest,
         trie_hash: Digest,
         trie_or_chunk: TrieOrChunk,
         maybe_peer: Option<NodeId>,
     ) -> Result<(), Error> {
         let acceptance = self.acquisition_state.register_trie_or_chunk(
+            state_root_hash,
             trie_hash,
             trie_or_chunk,
             self.should_fetch_execution_state,
@@ -491,22 +493,23 @@ impl BlockBuilder {
         self.handle_acceptance(maybe_peer, acceptance)
     }
 
-    pub(super) fn register_trie_fetch_error(&mut self, trie_hash: Digest) -> Result<(), Error> {
+    pub(super) fn register_trie_fetch_error(&mut self, state_root_hash: Digest, trie_hash: Digest) -> Result<(), Error> {
         let acceptance = self
             .acquisition_state
-            .register_trie_or_chunk_fetch_error(trie_hash);
+            .register_trie_or_chunk_fetch_error(state_root_hash, trie_hash);
         self.handle_acceptance(None, acceptance)
     }
 
     pub(super) fn register_put_trie(
         &mut self,
+        state_root_hash: Digest,
         trie_hash: Digest,
         trie_raw: TrieRaw,
         put_trie_result: Result<Digest, engine_state::Error>,
     ) -> Result<(), Error> {
         let acceptance =
             self.acquisition_state
-                .register_put_trie(trie_hash, trie_raw, put_trie_result);
+                .register_put_trie(state_root_hash, trie_hash, trie_raw, put_trie_result);
         self.handle_acceptance(None, acceptance)
     }
 
@@ -518,6 +521,12 @@ impl BlockBuilder {
             .acquisition_state
             .register_block_header_requested_from_storage(block_header);
         self.handle_acceptance(None, acceptance)
+    }
+
+    pub(super) fn register_wait_for_era_validators(&mut self) {
+        self
+            .acquisition_state
+            .register_wait_for_era_validators();
     }
 
     pub(super) fn register_era_validators_from_contract_runtime(
@@ -639,9 +648,9 @@ impl BlockBuilder {
             .register_pending_trie_fetches(trie_fetches_in_progress);
     }
 
-    pub(super) fn register_pending_put_tries(&mut self, put_tries_in_progress: HashSet<Digest>) {
+    pub(super) fn register_pending_put_tries(&mut self, state_root_hash: Digest, put_tries_in_progress: HashSet<Digest>) {
         self.acquisition_state
-            .register_pending_put_tries(put_tries_in_progress);
+            .register_pending_put_tries(state_root_hash, put_tries_in_progress);
     }
 
     pub(super) fn register_deploy(

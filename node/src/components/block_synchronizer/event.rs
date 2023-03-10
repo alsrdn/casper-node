@@ -97,10 +97,12 @@ pub(crate) enum Event {
     },
     TrieOrChunkFetched {
         block_hash: BlockHash,
+        state_root_hash: Digest,
         trie_hash: Digest,
         result: FetchResult<TrieOrChunk>,
     },
     PutTrieResult {
+        state_root_hash: Digest,
         trie_hash: Digest,
         trie_raw: Box<TrieRaw>,
         #[serde(skip)]
@@ -111,6 +113,7 @@ pub(crate) enum Event {
     NetworkPeers(BlockHash, Vec<NodeId>),
     EraValidatorsFromContractRuntime(Digest, Result<EraValidators, EraValidatorsGetError>),
     BlockHeaderFromStorage(Option<BlockHeader>),
+    WaitForEraValidators,
 }
 
 impl Display for Event {
@@ -197,21 +200,23 @@ impl Display for Event {
             }
             Event::TrieOrChunkFetched {
                 block_hash,
+                state_root_hash,
                 trie_hash,
                 result: _,
             } => {
                 write!(
                     f,
-                    "fetch response syncing block {} for trie hash {}",
-                    block_hash, trie_hash
+                    "fetch response received syncing trie hash {} block {} with state root hash {}",
+                    trie_hash, block_hash, trie_hash
                 )
             }
             Event::PutTrieResult {
+                state_root_hash,
                 trie_hash,
                 trie_raw: _,
                 put_trie_result: _,
             } => {
-                write!(f, "put trie result for trie {}", trie_hash)
+                write!(f, "put trie result for trie {} acquiring state root hash {}", trie_hash, state_root_hash)
             }
             Event::EraValidatorsFromContractRuntime(root_hash, _) => {
                 write!(
@@ -222,6 +227,9 @@ impl Display for Event {
             }
             Event::BlockHeaderFromStorage(..) => {
                 write!(f, "block header from storage response")
+            }
+            Event::WaitForEraValidators => {
+                write!(f, "wait for era validators")
             }
         }
     }

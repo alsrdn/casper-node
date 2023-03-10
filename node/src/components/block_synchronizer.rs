@@ -49,7 +49,7 @@ use crate::{
         requests::{
             BlockAccumulatorRequest, BlockCompleteConfirmationRequest, BlockSynchronizerRequest,
             ContractRuntimeRequest, FetcherRequest, MakeBlockExecutableRequest, NetworkInfoRequest,
-            StorageRequest,
+            StorageRequest, UpdateEraValidatorsRequest,
         },
         EffectBuilder, EffectExt, Effects,
     },
@@ -117,6 +117,7 @@ pub(crate) trait ReactorEvent:
     + From<BlockCompleteConfirmationRequest>
     + From<MakeBlockExecutableRequest>
     + From<MetaBlockAnnouncement>
+    + From<UpdateEraValidatorsRequest>
     + Send
     + 'static
 {
@@ -139,6 +140,7 @@ impl<REv> ReactorEvent for REv where
         + From<BlockCompleteConfirmationRequest>
         + From<MakeBlockExecutableRequest>
         + From<MetaBlockAnnouncement>
+        + From<UpdateEraValidatorsRequest>
         + Send
         + 'static
 {
@@ -481,6 +483,7 @@ impl BlockSynchronizer {
     fn trie_or_chunk_fetched(
         &mut self,
         block_hash: BlockHash,
+        state_root_hash: Digest,
         trie_hash: Digest,
         result: FetchResult<TrieOrChunk>,
     ) {
@@ -513,13 +516,13 @@ impl BlockSynchronizer {
                 None => {
                     debug!(%block_hash, trie_or_chunk_id=?id, ?maybe_peer, "BlockSynchronizer: failed to fetch trie or chunk from peer");
                     builder.demote_peer(maybe_peer);
-                    if let Err(error) = builder.register_trie_fetch_error(trie_hash) {
+                    if let Err(error) = builder.register_trie_fetch_error(state_root_hash, trie_hash) {
                         debug!(%error, trie_or_chunk_id=%id, "BlockSynchronizer: failed to register trie fetch error");
                     }
                 }
                 Some(trie_or_chunk) => {
                     if let Err(error) =
-                        builder.register_trie_or_chunk(trie_hash, *trie_or_chunk, maybe_peer)
+                        builder.register_trie_or_chunk(state_root_hash, trie_hash, *trie_or_chunk, maybe_peer)
                     {
                         // This would only happen if somehow validation of the trie or chunk was
                         // bypassed or there is a programming error in the fetch validation logic.
@@ -535,12 +538,13 @@ impl BlockSynchronizer {
 
     fn put_trie_result(
         &mut self,
+        state_root_hash: Digest,
         trie_hash: Digest,
         trie_raw: TrieRaw,
         put_trie_result: Result<Digest, engine_state::Error>,
     ) {
         if let Some(builder) = &mut self.historical {
-            if let Err(error) = builder.register_put_trie(trie_hash, trie_raw, put_trie_result) {
+            if let Err(error) = builder.register_put_trie(state_root_hash, trie_hash, trie_raw, put_trie_result) {
                 warn!(%error, "BlockSynchronizer: failed to announce put trie");
             }
         }
@@ -552,6 +556,12 @@ impl BlockSynchronizer {
                 warn!(%error, "BlockSynchronizer: register a block_header_requested_from_storage");
                 builder.abort();
             }
+        }
+    }
+
+    fn register_wait_for_era_validators(&mut self) {
+        if let Some(builder) = &mut self.historical {
+            builder.register_wait_for_era_validators();
         }
     }
 
@@ -663,7 +673,7 @@ impl BlockSynchronizer {
                     }
                     NeedNext::GlobalState(
                         block_hash,
-                        global_state_root_hash,
+                        state_root_hash,
                         tries_to_store,
                         tries_to_fetch,
                     ) => {
@@ -679,6 +689,7 @@ impl BlockSynchronizer {
                                     .fetch::<TrieOrChunk>(trie_id, peer, EmptyValidationMetadata)
                                     .event(move |result| Event::TrieOrChunkFetched {
                                         block_hash,
+                                        state_root_hash,
                                         trie_hash: *trie_id.digest(),
                                         result,
                                     }),
@@ -693,6 +704,7 @@ impl BlockSynchronizer {
                                 effect_builder
                                     .put_trie_if_all_children_present(trie_raw.clone())
                                     .event(move |put_trie_result| Event::PutTrieResult {
+                                        state_root_hash,
                                         trie_hash,
                                         trie_raw: Box::new(trie_raw),
                                         put_trie_result,
@@ -700,7 +712,7 @@ impl BlockSynchronizer {
                             )
                         }
 
-                        builder.register_pending_put_tries(put_tries_in_progress);
+                        builder.register_pending_put_tries(state_root_hash, put_tries_in_progress);
                     }
                     NeedNext::ExecutionResultsChecksum(block_hash, global_state_root_hash) => {
                         builder.set_in_flight_latch();
@@ -825,6 +837,16 @@ impl BlockSynchronizer {
                     }
                     NeedNext::UpdateEraValidators(era_id, validator_weights) => {
                         //TODO: update reactor validator matrix
+                        builder.register_wait_for_era_validators();
+                        results.extend(
+                            effect_builder
+                            .update_era_validators(era_id, validator_weights).ignore()
+                        );
+                        results.extend(
+                            effect_builder
+                                .immediately()
+                                .event(|_| Event::Request(BlockSynchronizerRequest::NeedNext)),
+                        )
                     }
                     NeedNext::BlockHeaderFromStorage(block_hash) => results.extend(
                         effect_builder
@@ -1305,7 +1327,8 @@ impl<REv: ReactorEvent> Component<REv> for BlockSynchronizer {
                     | Event::TrieOrChunkFetched { .. }
                     | Event::PutTrieResult { .. }
                     | Event::EraValidatorsFromContractRuntime(..)
-                    | Event::BlockHeaderFromStorage(_) => {
+                    | Event::BlockHeaderFromStorage(_)
+                    | Event::WaitForEraValidators => {
                         warn!(
                             ?event,
                             name = <Self as Component<MainEvent>>::name(self),
@@ -1492,20 +1515,22 @@ impl<REv: ReactorEvent> Component<REv> for BlockSynchronizer {
                 }
                 Event::TrieOrChunkFetched {
                     block_hash,
+                    state_root_hash,
                     trie_hash,
                     result,
                 } => {
                     debug!(%trie_hash, "BlockSynchronizer: got a trie or chunk");
-                    self.trie_or_chunk_fetched(block_hash, trie_hash, result);
+                    self.trie_or_chunk_fetched(block_hash, state_root_hash, trie_hash, result);
                     self.need_next(effect_builder, rng)
                 }
                 Event::PutTrieResult {
+                    state_root_hash,
                     trie_hash,
                     trie_raw,
                     put_trie_result,
                 } => {
                     debug!(%trie_hash, "BlockSynchronizer: got a response from the Contract Runtime for PutTrie");
-                    self.put_trie_result(trie_hash, *trie_raw, put_trie_result);
+                    self.put_trie_result(state_root_hash, trie_hash, *trie_raw, put_trie_result);
                     self.need_next(effect_builder, rng)
                 }
                 Event::EraValidatorsFromContractRuntime(state_hash, era_validators) => {
@@ -1514,6 +1539,10 @@ impl<REv: ReactorEvent> Component<REv> for BlockSynchronizer {
                 }
                 Event::BlockHeaderFromStorage(block_header) => {
                     self.register_block_header_requested_from_storage(block_header);
+                    self.need_next(effect_builder, rng)
+                }
+                Event::WaitForEraValidators => {
+                    self.register_wait_for_era_validators();
                     self.need_next(effect_builder, rng)
                 }
             },
