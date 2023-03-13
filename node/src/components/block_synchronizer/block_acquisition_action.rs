@@ -159,7 +159,12 @@ impl BlockAcquisitionAction {
         let tries_to_fetch = global_state_acquisition.tries_to_fetch(max_parallel_trie_fetches);
         BlockAcquisitionAction {
             peers_to_ask,
-            need_next: NeedNext::GlobalState(block_hash, state_root_hash, tries_to_store, tries_to_fetch),
+            need_next: NeedNext::GlobalState(
+                block_hash,
+                state_root_hash,
+                tries_to_store,
+                tries_to_fetch,
+            ),
         }
     }
 

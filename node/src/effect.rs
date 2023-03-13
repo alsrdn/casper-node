@@ -124,9 +124,11 @@ use casper_execution_engine::{
 };
 use casper_hashing::Digest;
 use casper_types::{
-    account::Account, bytesrepr::Bytes, system::auction::{EraValidators, ValidatorWeights}, Contract, ContractPackage,
-    EraId, ExecutionEffect, ExecutionResult, Key, PublicKey, TimeDiff, Timestamp, Transfer, URef,
-    U512,
+    account::Account,
+    bytesrepr::Bytes,
+    system::auction::{EraValidators, ValidatorWeights},
+    Contract, ContractPackage, EraId, ExecutionEffect, ExecutionResult, Key, PublicKey, TimeDiff,
+    Timestamp, Transfer, URef, U512,
 };
 
 use crate::{
@@ -165,7 +167,7 @@ use requests::{
     BeginGossipRequest, BlockAccumulatorRequest, BlockCompleteConfirmationRequest,
     BlockSynchronizerRequest, BlockValidationRequest, ChainspecRawBytesRequest, ConsensusRequest,
     FetcherRequest, MakeBlockExecutableRequest, NetworkInfoRequest, NetworkRequest,
-    ReactorStatusRequest, StorageRequest, UpgradeWatcherRequest, UpdateEraValidatorsRequest,
+    ReactorStatusRequest, StorageRequest, UpdateEraValidatorsRequest, UpgradeWatcherRequest,
 };
 
 use self::{
@@ -1757,12 +1759,21 @@ impl<REv> EffectBuilder<REv> {
             .await
     }
 
-    pub(crate) async fn update_era_validators(self, era_id: EraId, validators_to_register: ValidatorWeights)
-    where
+    pub(crate) async fn update_era_validators(
+        self,
+        era_id: EraId,
+        validators_to_register: ValidatorWeights,
+    ) where
         REv: From<UpdateEraValidatorsRequest>,
     {
         self.event_queue
-            .schedule(UpdateEraValidatorsRequest {era_id, validators_to_register }, QueueKind::Regular)
+            .schedule(
+                UpdateEraValidatorsRequest {
+                    era_id,
+                    validators_to_register,
+                },
+                QueueKind::Regular,
+            )
             .await
     }
 

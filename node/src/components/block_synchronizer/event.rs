@@ -113,7 +113,6 @@ pub(crate) enum Event {
     NetworkPeers(BlockHash, Vec<NodeId>),
     EraValidatorsFromContractRuntime(Digest, Result<EraValidators, EraValidatorsGetError>),
     BlockHeaderFromStorage(Option<BlockHeader>),
-    WaitForEraValidators,
 }
 
 impl Display for Event {
@@ -216,7 +215,11 @@ impl Display for Event {
                 trie_raw: _,
                 put_trie_result: _,
             } => {
-                write!(f, "put trie result for trie {} acquiring state root hash {}", trie_hash, state_root_hash)
+                write!(
+                    f,
+                    "put trie result for trie {} acquiring state root hash {}",
+                    trie_hash, state_root_hash
+                )
             }
             Event::EraValidatorsFromContractRuntime(root_hash, _) => {
                 write!(
@@ -227,9 +230,6 @@ impl Display for Event {
             }
             Event::BlockHeaderFromStorage(..) => {
                 write!(f, "block header from storage response")
-            }
-            Event::WaitForEraValidators => {
-                write!(f, "wait for era validators")
             }
         }
     }

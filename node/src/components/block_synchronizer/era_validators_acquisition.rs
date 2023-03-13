@@ -1,13 +1,15 @@
 use std::fmt::{Display, Formatter};
 
-use casper_execution_engine::{storage::trie::TrieRaw, core::engine_state};
+use casper_execution_engine::{core::engine_state, storage::trie::TrieRaw};
 use casper_hashing::Digest;
 use casper_types::system::auction::EraValidators;
 use datasize::DataSize;
 
 use crate::types::TrieOrChunk;
 
-use super::global_state_acquisition::{GlobalStateAcquisition, Error as GlobalStateAcquisitionError};
+use super::global_state_acquisition::{
+    Error as GlobalStateAcquisitionError, GlobalStateAcquisition,
+};
 
 #[derive(Clone, Copy, PartialEq, Eq, DataSize, Debug)]
 pub(crate) enum Error {
@@ -44,7 +46,6 @@ impl Display for Error {
             Error::GlobalStateAcquisition { err } => {
                 write!(f, "global state acquisition failed with error {}", err)
             }
-
         }
     }
 }
@@ -72,19 +73,23 @@ pub(super) struct EraValidatorsAcquisition {
 impl EraValidatorsAcquisition {
     pub(super) fn new() -> Self {
         Self {
-            state: EraValidatorsAcquisitionState::Empty
+            state: EraValidatorsAcquisitionState::Empty,
         }
     }
 
     pub(super) fn new_pending_from_storage(state_root_hash: Digest) -> Self {
         Self {
-            state: EraValidatorsAcquisitionState::PendingFromStorage { state_root_hash }
+            state: EraValidatorsAcquisitionState::PendingFromStorage { state_root_hash },
         }
     }
 
-    pub(super) fn new_pending_global_state(global_state_acquisition: GlobalStateAcquisition) -> Self {
+    pub(super) fn new_pending_global_state(
+        global_state_acquisition: GlobalStateAcquisition,
+    ) -> Self {
         Self {
-            state: EraValidatorsAcquisitionState::PendingGlobalState { global_state_acquisition }
+            state: EraValidatorsAcquisitionState::PendingGlobalState {
+                global_state_acquisition,
+            },
         }
     }
 
@@ -166,12 +171,10 @@ impl EraValidatorsAcquisition {
         &mut self,
         root_hash: Digest,
         trie_hash: Digest,
-        trie_or_chunk: TrieOrChunk
+        trie_or_chunk: TrieOrChunk,
     ) -> Result<(), Error> {
         match &mut self.state {
-            EraValidatorsAcquisitionState::Empty => Err(Error::NotAcquiring {
-                root_hash,
-            }),
+            EraValidatorsAcquisitionState::Empty => Err(Error::NotAcquiring { root_hash }),
             EraValidatorsAcquisitionState::Complete {
                 state_root_hash, ..
             } => {
@@ -204,7 +207,9 @@ impl EraValidatorsAcquisition {
                         actual: root_hash,
                     })
                 } else {
-                    global_state_acquisition.register_trie_or_chunk(trie_hash, trie_or_chunk).map_err(|err| Error::GlobalStateAcquisition { err })
+                    global_state_acquisition
+                        .register_trie_or_chunk(trie_hash, trie_or_chunk)
+                        .map_err(|err| Error::GlobalStateAcquisition { err })
                 }
             }
         }
@@ -218,9 +223,7 @@ impl EraValidatorsAcquisition {
         put_trie_result: Result<Digest, engine_state::Error>,
     ) -> Result<(), Error> {
         match &mut self.state {
-            EraValidatorsAcquisitionState::Empty => Err(Error::NotAcquiring {
-                root_hash,
-            }),
+            EraValidatorsAcquisitionState::Empty => Err(Error::NotAcquiring { root_hash }),
             EraValidatorsAcquisitionState::Complete {
                 state_root_hash, ..
             } => {
@@ -253,14 +256,20 @@ impl EraValidatorsAcquisition {
                         actual: root_hash,
                     })
                 } else {
-                    match global_state_acquisition.register_put_trie(trie_hash, trie_raw, put_trie_result) {
+                    match global_state_acquisition.register_put_trie(
+                        trie_hash,
+                        trie_raw,
+                        put_trie_result,
+                    ) {
                         Ok(()) => {
                             if global_state_acquisition.is_finished() {
-                                self.state = EraValidatorsAcquisitionState::PendingFromStorage { state_root_hash };
+                                self.state = EraValidatorsAcquisitionState::PendingFromStorage {
+                                    state_root_hash,
+                                };
                             }
                             Ok(())
                         }
-                        Err(err) => Err(Error::GlobalStateAcquisition { err })
+                        Err(err) => Err(Error::GlobalStateAcquisition { err }),
                     }
                 }
             }

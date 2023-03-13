@@ -27,8 +27,9 @@ use casper_execution_engine::{
 };
 use casper_hashing::Digest;
 use casper_types::{
-    bytesrepr::Bytes, system::auction::{EraValidators, ValidatorWeights}, EraId, ExecutionResult, Key, ProtocolVersion,
-    PublicKey, TimeDiff, Timestamp, Transfer, URef,
+    bytesrepr::Bytes,
+    system::auction::{EraValidators, ValidatorWeights},
+    EraId, ExecutionResult, Key, ProtocolVersion, PublicKey, TimeDiff, Timestamp, Transfer, URef,
 };
 
 use crate::{

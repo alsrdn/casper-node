@@ -1470,7 +1470,16 @@ impl Block {
         state_root_hash: Option<Digest>,
     ) -> Self {
         let parent_hash = BlockHash::new(rng.gen::<[u8; Digest::LENGTH]>().into());
-        Self::random_with_specifics_and_parent_hash(rng, era_id, height, protocol_version, is_switch, deploys_iter, state_root_hash, parent_hash)
+        Self::random_with_specifics_and_parent_hash(
+            rng,
+            era_id,
+            height,
+            protocol_version,
+            is_switch,
+            deploys_iter,
+            state_root_hash,
+            parent_hash,
+        )
     }
 
     #[cfg(any(feature = "testing", test))]

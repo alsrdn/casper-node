@@ -3,7 +3,10 @@ use std::fmt::{self, Debug, Display, Formatter};
 use derive_more::From;
 use serde::Serialize;
 
-use casper_types::{system::auction::{EraValidators, ValidatorWeights}, EraId};
+use casper_types::{
+    system::auction::{EraValidators, ValidatorWeights},
+    EraId,
+};
 
 use crate::{
     components::{
@@ -35,7 +38,7 @@ use crate::{
             ConsensusRequest, ContractRuntimeRequest, DeployBufferRequest, FetcherRequest,
             MakeBlockExecutableRequest, MetricsRequest, NetworkInfoRequest, NetworkRequest,
             ReactorStatusRequest, RestRequest, RpcRequest, SetNodeStopRequest, StorageRequest,
-            UpgradeWatcherRequest, UpdateEraValidatorsRequest,
+            UpdateEraValidatorsRequest, UpgradeWatcherRequest,
         },
     },
     protocol::Message,
