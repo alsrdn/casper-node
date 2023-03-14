@@ -3,14 +3,10 @@ use datasize::DataSize;
 use derive_more::Display;
 
 use casper_hashing::Digest;
-use casper_types::{
-    system::auction::{EraValidators, ValidatorWeights},
-    EraId, ProtocolVersion, PublicKey,
-};
+use casper_types::{system::auction::ValidatorWeights, EraId, ProtocolVersion, PublicKey};
 
 use crate::types::{
-    Block, BlockExecutionResultsOrChunkId, BlockHash, DeployHash, DeployId, TrieOrChunk,
-    TrieOrChunkId,
+    Block, BlockExecutionResultsOrChunkId, BlockHash, DeployHash, DeployId, TrieOrChunkId,
 };
 
 use super::execution_results_acquisition::ExecutionResultsChecksum;
@@ -29,8 +25,8 @@ pub(crate) enum NeedNext {
     EraValidatorsFromContractRuntime(Vec<(Digest, ProtocolVersion)>),
     #[display(fmt = "need next for era {}: update era validators", _0)]
     UpdateEraValidators(EraId, ValidatorWeights),
-    #[display(fmt = "need next for {}: header from storage", _0)]
-    BlockHeaderFromStorage(BlockHash),
+    #[display(fmt = "need next for {}: header of {} from storage", _0, _1)]
+    BlockHeaderFromStorage(BlockHash, BlockHash),
     #[display(fmt = "need next for {}: block body", _0)]
     BlockBody(BlockHash),
     #[display(fmt = "need next for {}: approvals hashes ({})", _0, _1)]

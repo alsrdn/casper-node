@@ -1759,6 +1759,7 @@ impl<REv> EffectBuilder<REv> {
             .await
     }
 
+    /// Requests an update to the validator matrix for the specified era
     pub(crate) async fn update_era_validators(
         self,
         era_id: EraId,

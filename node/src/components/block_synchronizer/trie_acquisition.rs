@@ -13,8 +13,6 @@ use casper_types::bytesrepr::Bytes;
 
 use crate::types::{TrieOrChunk, TrieOrChunkId, ValueOrChunk};
 
-// TODO: maybe add a new type for Digest to TrieHash?
-
 #[derive(Clone, Copy, PartialEq, Eq, DataSize, Debug)]
 pub(crate) enum Error {
     TrieHashMismatch {

@@ -31,6 +31,7 @@ pub(crate) enum BlockAcquisitionError {
     ExecutionResults(super::execution_results_acquisition::Error),
     GlobalStateAcquisition(super::global_state_acquisition::Error),
     EraValidatorsAcquisition(super::era_validators_acquisition::Error),
+    DuplicateGlobalStateAcquisition(Digest),
     BlockHeaderMissing,
     MissingEraValidatorWeights,
 }
@@ -80,10 +81,17 @@ impl Display for BlockAcquisitionError {
             BlockAcquisitionError::EraValidatorsAcquisition(error) => {
                 write!(f, "error when acquiring era validators: {}", error)
             }
+            BlockAcquisitionError::DuplicateGlobalStateAcquisition(state_root_hash) => {
+                write!(
+                    f,
+                    "found duplicate global state acquisition for state root hash: {}",
+                    state_root_hash
+                )
+            }
             BlockAcquisitionError::BlockHeaderMissing => {
                 write!(
                     f,
-                    "failed to get header from storage even if it was expected to exist"
+                    "failed to get block header from storage even if it was expected to exist"
                 )
             }
             BlockAcquisitionError::MissingEraValidatorWeights => {

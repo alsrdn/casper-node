@@ -20,7 +20,6 @@ use crate::{
     types::{
         ApprovalsHashes, Block, BlockExecutionResultsOrChunk, BlockHash, BlockHeader, DeployHash,
         DeployId, EraValidatorWeights, FinalitySignature, SignatureWeight, TrieOrChunk,
-        TrieOrChunkId,
     },
     NodeRng,
 };
@@ -102,7 +101,6 @@ pub(super) enum BlockAcquisitionState {
         acquired_block_era_validators: EraValidatorsAcquisition,
         acquired_parent_block_era_validators: EraValidatorsAcquisition,
         parent_block_header: Option<BlockHeader>,
-        wait_for_validator_matrix_to_update: bool,
     },
     HaveWeakFinalitySignatures(Box<BlockHeader>, SignatureAcquisition),
     HaveBlock(
@@ -312,7 +310,6 @@ impl BlockAcquisitionState {
                 acquired_block_era_validators,
                 acquired_parent_block_era_validators,
                 parent_block_header,
-                wait_for_validator_matrix_to_update,
             } => {
                 if let Some(validator_weights) = validator_weights {
                     if validator_weights.is_empty() {
@@ -344,92 +341,46 @@ impl BlockAcquisitionState {
                 } else {
                     let era_id = header.era_id();
 
-                    if *wait_for_validator_matrix_to_update {
-                        return Ok(BlockAcquisitionAction::era_validators(era_id));
-                    }
-
                     let block_state_root_hash = *header.state_root_hash();
                     let block_protocol_version = header.protocol_version();
 
-                    let block_era_validators = match acquired_block_era_validators.state_mut() {
-                        EraValidatorsAcquisitionState::Empty => {
-                            return Ok(
-                                BlockAcquisitionAction::era_validators_from_contract_runtime(vec![
-                                    (block_state_root_hash, block_protocol_version),
-                                ]),
-                            );
-                        }
-                        EraValidatorsAcquisitionState::PendingFromStorage { state_root_hash } => {
-                            return Ok(
-                                BlockAcquisitionAction::era_validators_from_contract_runtime(vec![
-                                    (block_state_root_hash, block_protocol_version),
-                                ]),
-                            );
-                        }
-                        EraValidatorsAcquisitionState::PendingGlobalState {
-                            global_state_acquisition,
-                        } => {
-                            return Ok(BlockAcquisitionAction::global_state(
-                                peer_list,
-                                rng,
+                    let block_era_validators = match acquired_block_era_validators.era_validators()
+                    {
+                        Ok(era_validators) => era_validators,
+                        Err(_) => {
+                            return Self::era_validators_acquisition_next_action(
+                                acquired_block_era_validators,
                                 header.block_hash(),
                                 block_state_root_hash,
-                                global_state_acquisition,
+                                block_protocol_version,
+                                rng,
+                                peer_list,
                                 max_parallel_trie_fetches,
-                            ));
+                            );
                         }
-                        EraValidatorsAcquisitionState::Complete {
-                            state_root_hash,
-                            era_validators,
-                        } => era_validators,
                     };
 
                     let parent_era_validators = if let Some(parent_header) = parent_block_header {
                         let parent_block_state_root_hash = *parent_header.state_root_hash();
                         let parent_block_protocol_version = parent_header.protocol_version();
 
-                        match acquired_parent_block_era_validators.state_mut() {
-                            EraValidatorsAcquisitionState::Empty => {
-                                return Ok(
-                                    BlockAcquisitionAction::era_validators_from_contract_runtime(
-                                        vec![(
-                                            parent_block_state_root_hash,
-                                            parent_block_protocol_version,
-                                        )],
-                                    ),
-                                );
-                            }
-                            EraValidatorsAcquisitionState::PendingFromStorage {
-                                state_root_hash,
-                            } => {
-                                return Ok(
-                                    BlockAcquisitionAction::era_validators_from_contract_runtime(
-                                        vec![(
-                                            parent_block_state_root_hash,
-                                            parent_block_protocol_version,
-                                        )],
-                                    ),
-                                );
-                            }
-                            EraValidatorsAcquisitionState::PendingGlobalState {
-                                global_state_acquisition,
-                            } => {
-                                return Ok(BlockAcquisitionAction::global_state(
-                                    peer_list,
-                                    rng,
+                        match acquired_parent_block_era_validators.era_validators() {
+                            Ok(era_validators) => era_validators,
+                            Err(_) => {
+                                return Self::era_validators_acquisition_next_action(
+                                    acquired_parent_block_era_validators,
                                     header.block_hash(),
                                     parent_block_state_root_hash,
-                                    global_state_acquisition,
+                                    parent_block_protocol_version,
+                                    rng,
+                                    peer_list,
                                     max_parallel_trie_fetches,
-                                ));
+                                );
                             }
-                            EraValidatorsAcquisitionState::Complete {
-                                state_root_hash,
-                                era_validators,
-                            } => era_validators,
                         }
                     } else {
                         return Ok(BlockAcquisitionAction::get_block_header_from_storage(
+                            header.block_hash(),
                             *header.parent_hash(),
                         ));
                     };
@@ -500,18 +451,20 @@ impl BlockAcquisitionState {
                         block, peer_list, rng,
                     ))
                 } else {
-                    if let Some(validator_weights) = validator_weights {
-                        Ok(BlockAcquisitionAction::strict_finality_signatures(
-                            peer_list,
-                            rng,
-                            block.header(),
-                            validator_weights,
-                            signatures,
-                            is_historical,
-                        ))
+                    let validator_weights = if let Some(validator_weights) = validator_weights {
+                        validator_weights
                     } else {
-                        Err(BlockAcquisitionError::MissingEraValidatorWeights)
-                    }
+                        return Err(BlockAcquisitionError::MissingEraValidatorWeights);
+                    };
+
+                    Ok(BlockAcquisitionAction::strict_finality_signatures(
+                        peer_list,
+                        rng,
+                        block.header(),
+                        validator_weights,
+                        signatures,
+                        is_historical,
+                    ))
                 }
             }
             BlockAcquisitionState::HaveGlobalState(
@@ -530,18 +483,20 @@ impl BlockAcquisitionState {
                         exec_results,
                     )
                 } else {
-                    if let Some(validator_weights) = validator_weights {
-                        Ok(BlockAcquisitionAction::strict_finality_signatures(
-                            peer_list,
-                            rng,
-                            block.header(),
-                            validator_weights,
-                            signatures,
-                            is_historical,
-                        ))
+                    let validator_weights = if let Some(validator_weights) = validator_weights {
+                        validator_weights
                     } else {
-                        Err(BlockAcquisitionError::MissingEraValidatorWeights)
-                    }
+                        return Err(BlockAcquisitionError::MissingEraValidatorWeights);
+                    };
+
+                    Ok(BlockAcquisitionAction::strict_finality_signatures(
+                        peer_list,
+                        rng,
+                        block.header(),
+                        validator_weights,
+                        signatures,
+                        is_historical,
+                    ))
                 }
             }
             BlockAcquisitionState::HaveAllExecutionResults(
@@ -557,19 +512,21 @@ impl BlockAcquisitionState {
                         block, peer_list, rng,
                     ))
                 } else {
-                    if let Some(validator_weights) = validator_weights {
-                        Ok(BlockAcquisitionAction::maybe_needs_deploy(
-                            block.header(),
-                            peer_list,
-                            rng,
-                            validator_weights,
-                            signatures,
-                            deploys.needs_deploy(),
-                            is_historical,
-                        ))
+                    let validator_weights = if let Some(validator_weights) = validator_weights {
+                        validator_weights
                     } else {
-                        Err(BlockAcquisitionError::MissingEraValidatorWeights)
-                    }
+                        return Err(BlockAcquisitionError::MissingEraValidatorWeights);
+                    };
+
+                    Ok(BlockAcquisitionAction::maybe_needs_deploy(
+                        block.header(),
+                        peer_list,
+                        rng,
+                        validator_weights,
+                        signatures,
+                        deploys.needs_deploy(),
+                        is_historical,
+                    ))
                 }
             }
             BlockAcquisitionState::HaveAllExecutionResults(_, _, _, _) => {
@@ -614,25 +571,61 @@ impl BlockAcquisitionState {
         ret
     }
 
-    pub(super) fn register_pending_trie_fetches(
-        &mut self,
-        trie_fetches_in_progress: HashSet<Digest>,
-    ) {
-        match self {
-            BlockAcquisitionState::HaveBlock(_, _, _, Some(global_state_acq)) => {
-                global_state_acq.register_pending_trie_fetches(trie_fetches_in_progress);
-            }
-            BlockAcquisitionState::HaveBlock(_, _, _, None)
-            | BlockAcquisitionState::Initialized(_, _)
-            | BlockAcquisitionState::HaveBlockHeader { .. }
-            | BlockAcquisitionState::HaveWeakFinalitySignatures(_, _)
-            | BlockAcquisitionState::HaveGlobalState(_, _, _, _)
-            | BlockAcquisitionState::HaveAllExecutionResults(_, _, _, _)
-            | BlockAcquisitionState::HaveApprovalsHashes(_, _, _)
-            | BlockAcquisitionState::HaveAllDeploys(_, _)
-            | BlockAcquisitionState::HaveStrictFinalitySignatures(_, _)
-            | BlockAcquisitionState::Failed(_, _) => {}
+    fn era_validators_acquisition_next_action(
+        acquired_era_validators: &mut EraValidatorsAcquisition,
+        block_hash: BlockHash,
+        block_state_root_hash: Digest,
+        block_protocol_version: ProtocolVersion,
+        rng: &mut NodeRng,
+        peer_list: &PeerList,
+        max_parallel_trie_fetches: usize,
+    ) -> Result<BlockAcquisitionAction, BlockAcquisitionError> {
+        if acquired_era_validators.is_empty() {
+            return Ok(
+                BlockAcquisitionAction::era_validators_from_contract_runtime(vec![(
+                    block_state_root_hash,
+                    block_protocol_version,
+                )]),
+            );
         }
+
+        if acquired_era_validators.is_pending_from_storage() {
+            if !acquired_era_validators.is_acquiring_from_root_hash(&block_state_root_hash) {
+                return Err(BlockAcquisitionError::RootHashMismatch {
+                    expected: block_state_root_hash,
+                    actual: acquired_era_validators.state_root_hash().unwrap(),
+                });
+            }
+            return Ok(
+                BlockAcquisitionAction::era_validators_from_contract_runtime(vec![(
+                    block_state_root_hash,
+                    block_protocol_version,
+                )]),
+            );
+        }
+
+        if acquired_era_validators.is_pending_global_state() {
+            if !acquired_era_validators.is_acquiring_from_root_hash(&block_state_root_hash) {
+                return Err(BlockAcquisitionError::RootHashMismatch {
+                    expected: block_state_root_hash,
+                    actual: acquired_era_validators.state_root_hash().unwrap(),
+                });
+            }
+
+            let global_state_acquisition = acquired_era_validators
+                .global_state_acquisition_mut()
+                .unwrap();
+            return Ok(BlockAcquisitionAction::global_state(
+                peer_list,
+                rng,
+                block_hash,
+                block_state_root_hash,
+                global_state_acquisition,
+                max_parallel_trie_fetches,
+            ));
+        }
+
+        Ok(BlockAcquisitionAction::need_nothing(block_hash))
     }
 
     pub(super) fn register_pending_put_tries(
@@ -654,10 +647,6 @@ impl BlockAcquisitionState {
                     acquired_parent_block_era_validators
                         .is_acquiring_from_root_hash(&state_root_hash),
                 ) {
-                    (true, true) => {
-                        // TODO: Error out here
-                        //Ok(Some(Acceptance::HadIt))
-                    }
                     (true, false) => {
                         if let EraValidatorsAcquisitionState::PendingGlobalState {
                             global_state_acquisition,
@@ -676,7 +665,8 @@ impl BlockAcquisitionState {
                                 .register_pending_put_tries(put_tries_in_progress);
                         }
                     }
-                    (false, false) => {} //Ok(None),
+                    (true, true)
+                    | (false, false) => {},
                 }
             }
             BlockAcquisitionState::HaveBlock(_, _, _, None)
@@ -732,7 +722,6 @@ impl BlockAcquisitionState {
                             EraValidatorsAcquisition::new_pending_from_storage(state_root_hash),
                         acquired_parent_block_era_validators: EraValidatorsAcquisition::new(),
                         parent_block_header: None,
-                        wait_for_validator_matrix_to_update: false,
                     }
                 } else {
                     return Err(BlockAcquisitionError::BlockHashMismatch {
@@ -1012,7 +1001,6 @@ impl BlockAcquisitionState {
         state_root_hash: Digest,
         trie_hash: Digest,
         trie_or_chunk: TrieOrChunk,
-        is_historical: bool,
     ) -> Result<Option<Acceptance>, BlockAcquisitionError> {
         match self {
             BlockAcquisitionState::HaveBlock(_, _, _, Some(global_state_acq)) => {
@@ -1033,8 +1021,7 @@ impl BlockAcquisitionState {
                         .is_acquiring_from_root_hash(&state_root_hash),
                 ) {
                     (true, true) => {
-                        // TODO: Error out here
-                        Ok(Some(Acceptance::HadIt))
+                        Err(BlockAcquisitionError::DuplicateGlobalStateAcquisition(state_root_hash))
                     }
                     (true, false) => Self::update_era_validators_acquisition_with_trie_or_chunk(
                         acquired_block_era_validators,
@@ -1081,8 +1068,26 @@ impl BlockAcquisitionState {
                 acquired_parent_block_era_validators,
                 ..
             } => {
-                // TODO
-                Ok(None)
+                match (
+                    acquired_block_era_validators.is_acquiring_from_root_hash(&state_root_hash),
+                    acquired_parent_block_era_validators
+                        .is_acquiring_from_root_hash(&state_root_hash),
+                ) {
+                    (true, true) => {
+                        Err(BlockAcquisitionError::DuplicateGlobalStateAcquisition(state_root_hash))
+                    }
+                    (true, false) => Self::update_era_validators_acquisition_with_trie_or_chunk_fetch_error(
+                        acquired_block_era_validators,
+                        state_root_hash,
+                        trie_hash,
+                    ),
+                    (false, true) => Self::update_era_validators_acquisition_with_trie_or_chunk_fetch_error(
+                        acquired_parent_block_era_validators,
+                        state_root_hash,
+                        trie_hash,
+                    ),
+                    (false, false) => Ok(None),
+                }
             }
             BlockAcquisitionState::HaveBlock(_, _, _, None)
             | BlockAcquisitionState::Initialized(_, _)
@@ -1144,8 +1149,7 @@ impl BlockAcquisitionState {
                         .is_acquiring_from_root_hash(&state_root_hash),
                 ) {
                     (true, true) => {
-                        // TODO: Error out here
-                        Ok(Some(Acceptance::HadIt))
+                        Err(BlockAcquisitionError::DuplicateGlobalStateAcquisition(state_root_hash))
                     }
                     (true, false) => Self::update_era_validators_acquisition_with_put_trie_result(
                         acquired_block_era_validators,
@@ -1198,7 +1202,7 @@ impl BlockAcquisitionState {
                         Ok(Some(Acceptance::HadIt))
                     } else {
                         let state_root_hash = *header.state_root_hash();
-                        parent_block_header.insert(header);
+                        *parent_block_header = Some(header);
                         *acquired_parent_block_era_validators =
                             EraValidatorsAcquisition::new_pending_from_storage(state_root_hash);
                         Ok(Some(Acceptance::NeededIt))
@@ -1219,26 +1223,6 @@ impl BlockAcquisitionState {
         }
     }
 
-    pub(super) fn register_wait_for_era_validators(&mut self) {
-        match self {
-            BlockAcquisitionState::HaveBlockHeader {
-                wait_for_validator_matrix_to_update,
-                ..
-            } => {
-                *wait_for_validator_matrix_to_update = true;
-            }
-            BlockAcquisitionState::HaveBlock(_, _, _, _)
-            | BlockAcquisitionState::Initialized(_, _)
-            | BlockAcquisitionState::HaveWeakFinalitySignatures(_, _)
-            | BlockAcquisitionState::HaveGlobalState(_, _, _, _)
-            | BlockAcquisitionState::HaveAllExecutionResults(_, _, _, _)
-            | BlockAcquisitionState::HaveApprovalsHashes(_, _, _)
-            | BlockAcquisitionState::HaveAllDeploys(_, _)
-            | BlockAcquisitionState::HaveStrictFinalitySignatures(_, _)
-            | BlockAcquisitionState::Failed(_, _) => {}
-        }
-    }
-
     fn update_era_validators_acquisition_with_trie_or_chunk(
         era_validators_acquisition: &mut EraValidatorsAcquisition,
         state_root_hash: Digest,
@@ -1249,6 +1233,25 @@ impl BlockAcquisitionState {
             state_root_hash,
             trie_hash,
             trie_or_chunk,
+        ) {
+            Ok(()) => Ok(Some(Acceptance::NeededIt)),
+            Err(EraValidatorsAcquisitionError::AlreadyComplete) => Ok(Some(Acceptance::HadIt)),
+            Err(EraValidatorsAcquisitionError::NotAcquiring { .. })
+            | Err(EraValidatorsAcquisitionError::GlobalStateAcquisition {
+                err: GlobalStateAcquisitionError::UnexpectedTrieOrChunkRegister(_),
+            }) => Ok(None),
+            Err(e) => Err(BlockAcquisitionError::EraValidatorsAcquisition(e)),
+        }
+    }
+
+    fn update_era_validators_acquisition_with_trie_or_chunk_fetch_error(
+        era_validators_acquisition: &mut EraValidatorsAcquisition,
+        state_root_hash: Digest,
+        trie_hash: Digest,
+    ) -> Result<Option<Acceptance>, BlockAcquisitionError> {
+        match era_validators_acquisition.register_global_state_trie_or_chunk_fetch_error(
+            state_root_hash,
+            trie_hash,
         ) {
             Ok(()) => Ok(Some(Acceptance::NeededIt)),
             Err(EraValidatorsAcquisitionError::AlreadyComplete) => Ok(Some(Acceptance::HadIt)),
@@ -1283,18 +1286,6 @@ impl BlockAcquisitionState {
         }
     }
 
-    fn update_era_validators_acquisition_with_pending_put_trie(
-        era_validators_acquisition: &mut EraValidatorsAcquisition,
-        put_tries_in_progress: HashSet<Digest>,
-    ) {
-        if let EraValidatorsAcquisitionState::PendingGlobalState {
-            global_state_acquisition,
-        } = era_validators_acquisition.state_mut()
-        {
-            global_state_acquisition.register_pending_put_tries(put_tries_in_progress);
-        }
-    }
-
     fn update_era_validators_for_acquisition(
         era_validators_acquisition: &mut EraValidatorsAcquisition,
         state_hash: &Digest,
@@ -1304,7 +1295,7 @@ impl BlockAcquisitionState {
             Ok(era_validators) => {
                 match era_validators_acquisition.register_era_validators(state_hash, era_validators)
                 {
-                    Ok(block_era_validators) => Ok(Some(Acceptance::NeededIt)),
+                    Ok(()) => Ok(Some(Acceptance::NeededIt)),
                     Err(EraValidatorsAcquisitionError::AlreadyComplete) => {
                         Ok(Some(Acceptance::HadIt))
                     }
@@ -1340,8 +1331,7 @@ impl BlockAcquisitionState {
                         .is_acquiring_from_root_hash(&from_state_root_hash),
                 ) {
                     (true, true) => {
-                        // TODO: Error out here
-                        Ok(Some(Acceptance::HadIt))
+                        Err(BlockAcquisitionError::DuplicateGlobalStateAcquisition(from_state_root_hash))
                     }
                     (true, false) => Self::update_era_validators_for_acquisition(
                         acquired_block_era_validators,

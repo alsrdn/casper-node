@@ -112,7 +112,7 @@ pub(crate) enum Event {
     AccumulatedPeers(BlockHash, Option<Vec<NodeId>>),
     NetworkPeers(BlockHash, Vec<NodeId>),
     EraValidatorsFromContractRuntime(Digest, Result<EraValidators, EraValidatorsGetError>),
-    BlockHeaderFromStorage(Option<BlockHeader>),
+    BlockHeaderFromStorage(BlockHash, Option<BlockHeader>),
 }
 
 impl Display for Event {
@@ -206,7 +206,7 @@ impl Display for Event {
                 write!(
                     f,
                     "fetch response received syncing trie hash {} block {} with state root hash {}",
-                    trie_hash, block_hash, trie_hash
+                    trie_hash, block_hash, state_root_hash
                 )
             }
             Event::PutTrieResult {
@@ -228,8 +228,8 @@ impl Display for Event {
                     root_hash
                 )
             }
-            Event::BlockHeaderFromStorage(..) => {
-                write!(f, "block header from storage response")
+            Event::BlockHeaderFromStorage(block_hash, _) => {
+                write!(f, "block header from storage response required for syncing block {}", block_hash)
             }
         }
     }

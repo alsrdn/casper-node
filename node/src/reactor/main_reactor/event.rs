@@ -3,11 +3,6 @@ use std::fmt::{self, Debug, Display, Formatter};
 use derive_more::From;
 use serde::Serialize;
 
-use casper_types::{
-    system::auction::{EraValidators, ValidatorWeights},
-    EraId,
-};
-
 use crate::{
     components::{
         block_accumulator,

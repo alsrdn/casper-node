@@ -557,18 +557,19 @@ impl BlockSynchronizer {
         }
     }
 
-    fn register_block_header_requested_from_storage(&mut self, block_header: Option<BlockHeader>) {
+    fn register_block_header_requested_from_storage(&mut self, requested_for_block: BlockHash, block_header: Option<BlockHeader>) {
         if let Some(builder) = &mut self.historical {
+            if builder.block_hash() != requested_for_block {
+                debug!(%requested_for_block, "BlockSynchronizer: not currently synchronizing block");
+                return;
+            }
+
             if let Err(error) = builder.register_block_header_requested_from_storage(block_header) {
                 warn!(%error, "BlockSynchronizer: register a block_header_requested_from_storage");
                 builder.abort();
             }
-        }
-    }
-
-    fn register_wait_for_era_validators(&mut self) {
-        if let Some(builder) = &mut self.historical {
-            builder.register_wait_for_era_validators();
+        } else {
+            trace!(%requested_for_block, "BlockSynchronizer: not currently synchronizing historical block");
         }
     }
 
@@ -584,6 +585,8 @@ impl BlockSynchronizer {
                 warn!(%error, "BlockSynchronizer: register a block_header_requested_from_storage");
                 builder.abort();
             }
+        } else {
+            trace!("BlockSynchronizer: not currently synchronizing historical block");
         }
     }
 
@@ -843,18 +846,16 @@ impl BlockSynchronizer {
                         }
                     }
                     NeedNext::UpdateEraValidators(era_id, validator_weights) => {
-                        //TODO: update reactor validator matrix
-                        builder.register_wait_for_era_validators();
                         results.extend(
                             effect_builder
                                 .update_era_validators(era_id, validator_weights)
                                 .ignore(),
                         );
                     }
-                    NeedNext::BlockHeaderFromStorage(block_hash) => results.extend(
+                    NeedNext::BlockHeaderFromStorage(requested_for_block, block_hash) => results.extend(
                         effect_builder
                             .get_block_header_from_storage(block_hash, false)
-                            .event(move |block_header| Event::BlockHeaderFromStorage(block_header)),
+                            .event(move |block_header| Event::BlockHeaderFromStorage(requested_for_block, block_header)),
                     ),
                 }
             };
@@ -1089,7 +1090,7 @@ impl BlockSynchronizer {
 
         if let Some(builder) = &mut self.historical {
             if builder.block_hash() != block_hash {
-                debug!(%block_hash, "BlockSynchronizer: not currently synchronising block");
+                debug!(%block_hash, "BlockSynchronizer: not currently synchronizing block");
             } else if let Err(error) =
                 builder.register_execution_results_checksum(execution_results_checksum)
             {
@@ -1330,7 +1331,7 @@ impl<REv: ReactorEvent> Component<REv> for BlockSynchronizer {
                     | Event::TrieOrChunkFetched { .. }
                     | Event::PutTrieResult { .. }
                     | Event::EraValidatorsFromContractRuntime(..)
-                    | Event::BlockHeaderFromStorage(_) => {
+                    | Event::BlockHeaderFromStorage(..) => {
                         warn!(
                             ?event,
                             name = <Self as Component<MainEvent>>::name(self),
@@ -1539,8 +1540,8 @@ impl<REv: ReactorEvent> Component<REv> for BlockSynchronizer {
                     self.register_era_validators_from_contract_runtime(state_hash, era_validators);
                     self.need_next(effect_builder, rng)
                 }
-                Event::BlockHeaderFromStorage(block_header) => {
-                    self.register_block_header_requested_from_storage(block_header);
+                Event::BlockHeaderFromStorage(requested_for_block, block_header) => {
+                    self.register_block_header_requested_from_storage(requested_for_block, block_header);
                     self.need_next(effect_builder, rng)
                 }
             },

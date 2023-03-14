@@ -19,6 +19,7 @@ use crate::{
         ALICE_PUBLIC_KEY, ALICE_SECRET_KEY, BOB_PUBLIC_KEY, CAROL_PUBLIC_KEY,
     },
     reactor::{EventQueueHandle, QueueKind, Scheduler},
+    testing::test_block_builder::TestBlockBuilder,
     types::{TrieOrChunkId, ValueOrChunk},
     utils,
 };
@@ -124,7 +125,7 @@ fn set_up_have_block_for_historical_builder(
             .with_max_parallel_trie_fetches(10),
         5,
         validator_matrix,
-        prometheus::default_registry(),
+        &prometheus::Registry::new(),
     )
     .unwrap();
 
@@ -193,7 +194,7 @@ async fn global_state_acquisition_is_created_for_historical_builder() {
     };
 
     assert_eq!(
-        *global_state_acq.as_ref().unwrap().root_hash(),
+        global_state_acq.as_ref().unwrap().root_hash(),
         *block.state_root_hash()
     );
 }
@@ -840,34 +841,24 @@ async fn sync_validator_weights_from_global_state() {
     )
     .unwrap();
 
-    let parent_random_deploys = [Deploy::random(&mut rng)];
     let parent_root_trie = random_test_trie(&mut rng, 64);
-    let parent_era = 3;
-    let parent_height = 39;
-    let parent_block = Block::random_with_specifics(
-        &mut rng,
-        EraId::from(parent_era),
-        parent_height,
-        ProtocolVersion::V1_0_0,
-        true,
-        parent_random_deploys.iter(),
-        Some(Digest::hash(parent_root_trie.inner())),
-    );
+    let parent_block = TestBlockBuilder::new()
+        .state_root_hash(Digest::hash(parent_root_trie.inner()))
+        .deploys([Deploy::random(&mut rng)].iter())
+        .era(3)
+        .height(39)
+        .switch_block(true)
+        .build(&mut rng);
 
-    let random_deploys = [Deploy::random(&mut rng)];
     let root_trie = random_test_trie(&mut rng, 64);
-    let era = 4;
-    let height = 49;
-    let block = Block::random_with_specifics_and_parent_hash(
-        &mut rng,
-        EraId::from(era),
-        height,
-        ProtocolVersion::V1_0_0,
-        true,
-        random_deploys.iter(),
-        Some(Digest::hash(root_trie.inner())),
-        *parent_block.hash(),
-    );
+    let block = TestBlockBuilder::new()
+        .state_root_hash(Digest::hash(root_trie.inner()))
+        .deploys([Deploy::random(&mut rng)].iter())
+        .era(4)
+        .height(49)
+        .switch_block(true)
+        .parent_hash(*parent_block.hash())
+        .build(&mut rng);
 
     // Generate more than 5 peers to see if the peer list changes after a global state sync error
     let num_peers = rng.gen_range(10..20);
@@ -926,7 +917,7 @@ async fn sync_validator_weights_from_global_state() {
     });
 
     block_synchronizer
-        .register_block_header_requested_from_storage(Some(parent_block.clone().take_header()));
+        .register_block_header_requested_from_storage(*block.hash(), Some(parent_block.clone().take_header()));
 
     let event = need_next(&mut rng, &mock_reactor, &mut block_synchronizer, 1)
         .await
@@ -1000,6 +991,15 @@ async fn sync_validator_weights_from_global_state() {
         .await
         .remove(0);
 
+    // Since there are no era validator weights for the block era, the synchronizer should try and
+    // get them from storage
+    assert_matches!(event, MockReactorEvent::ContractRuntimeRequest(req) => {
+        assert_matches!(req, ContractRuntimeRequest::GetEraValidators{request, responder: _} => {
+            assert_eq!(request.state_hash(), *parent_block.state_root_hash());
+            assert_eq!(request.protocol_version(), parent_block.protocol_version());
+        })
+    });
+
     let era_4_validator_weights: ValidatorWeights = BTreeMap::from([
         (BOB_PUBLIC_KEY.clone(), 100.into()),
         (CAROL_PUBLIC_KEY.clone(), 200.into()),
@@ -1035,6 +1035,5 @@ async fn sync_validator_weights_from_global_state() {
                 assert_eq!(req.id.block_hash, *block.hash());
                 assert_eq!(req.id.era_id, EraId::from(4));
         });
-        //println!("Ev: {:#?}", event);
     }
 }

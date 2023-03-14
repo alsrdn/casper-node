@@ -18,6 +18,7 @@ pub(crate) enum Error {
     GlobalStateAcquisition { err: GlobalStateAcquisitionError },
     NotWaitingForGlobalState,
     AlreadyComplete,
+    EraValidatorsNotAvailable,
 }
 
 impl Display for Error {
@@ -46,6 +47,9 @@ impl Display for Error {
             Error::GlobalStateAcquisition { err } => {
                 write!(f, "global state acquisition failed with error {}", err)
             }
+            Error::EraValidatorsNotAvailable => {
+                write!(f, "era validators not avaialble",)
+            }
         }
     }
 }
@@ -57,13 +61,21 @@ pub(super) enum EraValidatorsAcquisitionState {
         state_root_hash: Digest,
     },
     PendingGlobalState {
-        global_state_acquisition: GlobalStateAcquisition,
+        global_state_acquisition: Box<GlobalStateAcquisition>,
     },
     Complete {
         state_root_hash: Digest,
         era_validators: EraValidators,
     },
 }
+
+/*
+pub(super) enum EraValidatorsAcquisitionAction<'a> {
+    EraValidatorsFromContractRuntime { state_root_hash: Digest },
+    GlobalState { global_state_acquisition: &'a Box<GlobalStateAcquisition> },
+    Nothing,
+}
+*/
 
 #[derive(Clone, DataSize, Debug)]
 pub(super) struct EraValidatorsAcquisition {
@@ -88,7 +100,7 @@ impl EraValidatorsAcquisition {
     ) -> Self {
         Self {
             state: EraValidatorsAcquisitionState::PendingGlobalState {
-                global_state_acquisition,
+                global_state_acquisition: Box::new(global_state_acquisition),
             },
         }
     }
@@ -97,17 +109,81 @@ impl EraValidatorsAcquisition {
         &mut self.state
     }
 
+    pub(super) fn era_validators(&self) -> Result<&EraValidators, Error> {
+        match &self.state {
+            EraValidatorsAcquisitionState::Empty
+            | EraValidatorsAcquisitionState::PendingGlobalState { .. }
+            | EraValidatorsAcquisitionState::PendingFromStorage { .. } => {
+                Err(Error::EraValidatorsNotAvailable)
+            }
+            EraValidatorsAcquisitionState::Complete { era_validators, .. } => Ok(era_validators),
+        }
+    }
+
+    pub(super) fn is_empty(&self) -> bool {
+        match &self.state {
+            EraValidatorsAcquisitionState::Empty => true,
+            EraValidatorsAcquisitionState::PendingGlobalState { .. }
+            | EraValidatorsAcquisitionState::Complete { .. }
+            | EraValidatorsAcquisitionState::PendingFromStorage { .. } => false,
+        }
+    }
+
+    pub(super) fn is_pending_from_storage(&self) -> bool {
+        match &self.state {
+            EraValidatorsAcquisitionState::Empty
+            | EraValidatorsAcquisitionState::PendingGlobalState { .. }
+            | EraValidatorsAcquisitionState::Complete { .. } => false,
+            EraValidatorsAcquisitionState::PendingFromStorage { .. } => true,
+        }
+    }
+
+    pub(super) fn is_pending_global_state(&self) -> bool {
+        match &self.state {
+            EraValidatorsAcquisitionState::Empty
+            | EraValidatorsAcquisitionState::Complete { .. }
+            | EraValidatorsAcquisitionState::PendingFromStorage { .. } => false,
+            EraValidatorsAcquisitionState::PendingGlobalState { .. } => true,
+        }
+    }
+
+    pub(super) fn global_state_acquisition_mut(&mut self) -> Option<&mut GlobalStateAcquisition> {
+        match &mut self.state {
+            EraValidatorsAcquisitionState::PendingGlobalState {
+                global_state_acquisition,
+            } => Some(global_state_acquisition),
+            EraValidatorsAcquisitionState::Complete { .. }
+            | EraValidatorsAcquisitionState::PendingFromStorage { .. }
+            | EraValidatorsAcquisitionState::Empty => None,
+        }
+    }
+
     pub(super) fn is_acquiring_from_root_hash(&self, root_hash: &Digest) -> bool {
         match &self.state {
             EraValidatorsAcquisitionState::Empty => false,
             EraValidatorsAcquisitionState::PendingGlobalState {
                 global_state_acquisition,
-            } => global_state_acquisition.root_hash() == root_hash,
+            } => global_state_acquisition.root_hash() == *root_hash,
             EraValidatorsAcquisitionState::Complete {
                 state_root_hash, ..
             }
             | EraValidatorsAcquisitionState::PendingFromStorage { state_root_hash } => {
                 state_root_hash == root_hash
+            }
+        }
+    }
+
+    pub(super) fn state_root_hash(&self) -> Option<Digest> {
+        match &self.state {
+            EraValidatorsAcquisitionState::Empty => None,
+            EraValidatorsAcquisitionState::PendingGlobalState {
+                global_state_acquisition,
+            } => Some(global_state_acquisition.root_hash()),
+            EraValidatorsAcquisitionState::Complete {
+                state_root_hash, ..
+            }
+            | EraValidatorsAcquisitionState::PendingFromStorage { state_root_hash } => {
+                Some(*state_root_hash)
             }
         }
     }
@@ -150,7 +226,7 @@ impl EraValidatorsAcquisition {
             EraValidatorsAcquisitionState::PendingGlobalState {
                 global_state_acquisition,
             } => {
-                let state_root_hash = *global_state_acquisition.root_hash();
+                let state_root_hash = global_state_acquisition.root_hash();
                 if state_root_hash != *root_hash {
                     Err(Error::RootHashMismatch {
                         expected: state_root_hash,
@@ -200,7 +276,7 @@ impl EraValidatorsAcquisition {
             EraValidatorsAcquisitionState::PendingGlobalState {
                 global_state_acquisition,
             } => {
-                let state_root_hash = *global_state_acquisition.root_hash();
+                let state_root_hash = global_state_acquisition.root_hash();
                 if state_root_hash != root_hash {
                     Err(Error::RootHashMismatch {
                         expected: state_root_hash,
@@ -209,6 +285,53 @@ impl EraValidatorsAcquisition {
                 } else {
                     global_state_acquisition
                         .register_trie_or_chunk(trie_hash, trie_or_chunk)
+                        .map_err(|err| Error::GlobalStateAcquisition { err })
+                }
+            }
+        }
+    }
+
+    pub(super) fn register_global_state_trie_or_chunk_fetch_error(
+        &mut self,
+        root_hash: Digest,
+        trie_hash: Digest,
+    ) -> Result<(), Error> {
+        match &mut self.state {
+            EraValidatorsAcquisitionState::Empty => Err(Error::NotAcquiring { root_hash }),
+            EraValidatorsAcquisitionState::Complete {
+                state_root_hash, ..
+            } => {
+                if *state_root_hash == root_hash {
+                    Err(Error::AlreadyComplete)
+                } else {
+                    Err(Error::RootHashMismatch {
+                        expected: *state_root_hash,
+                        actual: root_hash,
+                    })
+                }
+            }
+            EraValidatorsAcquisitionState::PendingFromStorage { state_root_hash } => {
+                if *state_root_hash != root_hash {
+                    Err(Error::RootHashMismatch {
+                        expected: *state_root_hash,
+                        actual: root_hash,
+                    })
+                } else {
+                    Err(Error::NotWaitingForGlobalState)
+                }
+            }
+            EraValidatorsAcquisitionState::PendingGlobalState {
+                global_state_acquisition,
+            } => {
+                let state_root_hash = global_state_acquisition.root_hash();
+                if state_root_hash != root_hash {
+                    Err(Error::RootHashMismatch {
+                        expected: state_root_hash,
+                        actual: root_hash,
+                    })
+                } else {
+                    global_state_acquisition
+                        .register_trie_or_chunk_fetch_error(trie_hash)
                         .map_err(|err| Error::GlobalStateAcquisition { err })
                 }
             }
@@ -249,7 +372,7 @@ impl EraValidatorsAcquisition {
             EraValidatorsAcquisitionState::PendingGlobalState {
                 global_state_acquisition,
             } => {
-                let state_root_hash = *global_state_acquisition.root_hash();
+                let state_root_hash = global_state_acquisition.root_hash();
                 if state_root_hash != root_hash {
                     Err(Error::RootHashMismatch {
                         expected: state_root_hash,

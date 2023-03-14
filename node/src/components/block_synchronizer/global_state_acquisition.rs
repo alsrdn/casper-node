@@ -59,8 +59,6 @@ pub(crate) enum Error {
     TrieOrChunkApply(TrieAcquisitionError),
     UnexpectedTrieOrChunkRegister(Digest),
     TrieHashMismatch { expected: Digest, actual: Digest },
-    TrieAcquisitionError,
-    PutTrieError,
 }
 
 impl Display for Error {
@@ -74,13 +72,11 @@ impl Display for Error {
                 )
             }
             Error::UnexpectedTrieOrChunkRegister(hash) => {
-                write!(f, "attempted to register trie or chunk {} failed because trie or chunk was unexpected by Global State acquisition", hash)
-            }
-            Error::TrieAcquisitionError => {
-                write!(f, "trie acquisition error",)
-            }
-            Error::PutTrieError => {
-                write!(f, "put trie error",)
+                write!(
+                    f,
+                    "attempted to register trie or chunk {} failed because trie or chunk was unexpected by Global State acquisition",
+                    hash
+                )
             }
             Error::TrieHashMismatch { expected, actual } => {
                 write!(
@@ -136,8 +132,8 @@ impl GlobalStateAcquisition {
             && self.tries_awaiting_children.is_empty()
     }
 
-    pub(crate) fn root_hash(&self) -> &Digest {
-        &self.root_hash.0
+    pub(crate) fn root_hash(&self) -> Digest {
+        self.root_hash.into_inner()
     }
 
     pub(crate) fn tries_to_fetch(
@@ -168,28 +164,6 @@ impl GlobalStateAcquisition {
             }
         }
 
-        // TODO: for finality signatures we also retry pending fetches, but this creates a lot of
-        // potentially redundant fetches in this case. We can register back fetch errors to the
-        // global state acquisition and re-queue the trie then; this would lead to a minimum number
-        // or fetches at the same time (form only one peer) but might be slower than using multiple
-        // peers. Alternatively we can return the pending ones and add more fetches (from more peers
-        // potentially) which would maybe make it quicker. In this case the errors need to be
-        // revisited because somehow there's a storm of peer disqualifies when we do this now.
-        // Also it's probably a good idea to only return only from the fetch queue and handle
-        // fetch parallelism in the caller.
-        /*
-        // Retry pending if we have free fetch slots
-        if tries_or_chunks_to_fetch.len() < self.max_parallel_trie_fetches {
-            tries_or_chunks_to_fetch.extend(
-                self.pending_tries
-                    .iter()
-                    .take(self.max_parallel_trie_fetches - tries_or_chunks_to_fetch.len())
-                    .filter(|(_, (acq, _))| acq.needs_value_or_chunk().is_some())
-                    .map(|(_, (acq, _))| acq.needs_value_or_chunk().unwrap()),
-            )
-        }
-        */
-
         self.pending_tries.extend(pending);
 
         debug!(root_hash=%self.root_hash, ?tries_or_chunks_to_fetch, "GlobalStateAcquisition: returning tries to be fetched");
@@ -204,7 +178,7 @@ impl GlobalStateAcquisition {
         debug!(
             root_hash=%self.root_hash,
             ?trie_or_chunk,
-            "XXX GlobalStateAcquisition: received a trie or chunk"
+            "GlobalStateAcquisition: received a trie or chunk"
         );
 
         let fetched_trie_or_chunk_hash = *trie_or_chunk.trie_hash();
@@ -300,14 +274,6 @@ impl GlobalStateAcquisition {
         tries_to_store
     }
 
-    // TODO: maybe implement this to keep tries_to_fetch immutable; same for tries_to_store
-    pub(super) fn register_pending_trie_fetches(
-        &mut self,
-        trie_fetches_in_progress: HashSet<Digest>,
-    ) {
-        todo!()
-    }
-
     pub(super) fn register_pending_put_tries(
         &mut self,
         register_pending_put_tries: HashSet<Digest>,
@@ -319,6 +285,7 @@ impl GlobalStateAcquisition {
         }
     }
 
+    // Process the result of the `PutTrie` request
     pub(super) fn register_put_trie(
         &mut self,
         trie_hash: Digest,
@@ -426,7 +393,6 @@ impl GlobalStateAcquisition {
                         "GlobalStateAcquisition: trie_result shows that a different error has occurred"
                     );
 
-                    // TODO: is this correct or should we return an error?
                     // Retry to store this trie
                     self.acquired_tries
                         .insert(TrieHash(trie_hash), (trie_raw, parent));

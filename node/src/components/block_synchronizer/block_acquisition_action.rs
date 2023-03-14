@@ -2,10 +2,7 @@ use std::fmt::{self, Display, Formatter};
 use tracing::{info, warn};
 
 use casper_hashing::Digest;
-use casper_types::{
-    system::auction::{EraValidators, ValidatorWeights},
-    EraId, ProtocolVersion, PublicKey,
-};
+use casper_types::{system::auction::ValidatorWeights, EraId, ProtocolVersion, PublicKey};
 
 use crate::{
     components::block_synchronizer::{
@@ -120,10 +117,10 @@ impl BlockAcquisitionAction {
         }
     }
 
-    pub(super) fn get_block_header_from_storage(block_hash: BlockHash) -> Self {
+    pub(super) fn get_block_header_from_storage(needed_for_block: BlockHash, block_hash: BlockHash) -> Self {
         BlockAcquisitionAction {
             peers_to_ask: Vec::new(),
-            need_next: NeedNext::BlockHeaderFromStorage(block_hash),
+            need_next: NeedNext::BlockHeaderFromStorage(needed_for_block, block_hash),
         }
     }
 

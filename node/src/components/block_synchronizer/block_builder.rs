@@ -17,7 +17,6 @@ use casper_types::{system::auction::EraValidators, EraId, PublicKey, TimeDiff, T
 use super::{
     block_acquisition::{Acceptance, BlockAcquisitionState},
     block_acquisition_action::BlockAcquisitionAction,
-    era_validators_acquisition::EraValidatorsAcquisition,
     event::EraValidatorsGetError,
     execution_results_acquisition::{self, ExecutionResultsChecksum},
     peer_list::{PeerList, PeersStatus},
@@ -28,7 +27,7 @@ use crate::{
     types::{
         ApprovalsHashes, Block, BlockExecutionResultsOrChunk, BlockHash, BlockHeader,
         BlockSignatures, DeployHash, DeployId, EraValidatorWeights, FinalitySignature, NodeId,
-        TrieOrChunk, TrieOrChunkId, ValidatorMatrix,
+        TrieOrChunk, ValidatorMatrix,
     },
     NodeRng,
 };
@@ -488,7 +487,6 @@ impl BlockBuilder {
             state_root_hash,
             trie_hash,
             trie_or_chunk,
-            self.should_fetch_execution_state,
         );
         self.handle_acceptance(maybe_peer, acceptance)
     }
@@ -528,10 +526,6 @@ impl BlockBuilder {
             .acquisition_state
             .register_block_header_requested_from_storage(block_header);
         self.handle_acceptance(None, acceptance)
-    }
-
-    pub(super) fn register_wait_for_era_validators(&mut self) {
-        self.acquisition_state.register_wait_for_era_validators();
     }
 
     pub(super) fn register_era_validators_from_contract_runtime(
@@ -643,14 +637,6 @@ impl BlockBuilder {
         }
         self.touch();
         Ok(())
-    }
-
-    pub(super) fn register_pending_trie_fetches(
-        &mut self,
-        trie_fetches_in_progress: HashSet<Digest>,
-    ) {
-        self.acquisition_state
-            .register_pending_trie_fetches(trie_fetches_in_progress);
     }
 
     pub(super) fn register_pending_put_tries(
