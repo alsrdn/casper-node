@@ -900,7 +900,6 @@ fn accumulator_should_leap() {
         ProtocolVersion::V1_0_0,
         starting_seed % 2 == 0,
         None,
-        None,
     ));
 
     // One finality signature from our only validator for block 1.
@@ -1129,7 +1128,6 @@ fn accumulator_purge() {
         block_3.protocol_version(),
         false,
         None,
-        None,
     ));
     let in_range_block_sig = FinalitySignature::create(
         *in_range_block.hash(),
@@ -1165,7 +1163,6 @@ fn accumulator_purge() {
         block_3.height() - block_accumulator.attempt_execution_threshold - 1,
         block_3.protocol_version(),
         false,
-        None,
         None,
     ));
     let out_of_range_block_sig = FinalitySignature::create(
@@ -1267,7 +1264,6 @@ fn generate_next_block(rng: &mut TestRng, block: &Block) -> Block {
         block.protocol_version(),
         false,
         None,
-        None,
     )
 }
 
@@ -1283,7 +1279,6 @@ fn generate_non_genesis_block(rng: &mut TestRng) -> Block {
         ProtocolVersion::V1_0_0,
         is_switch,
         None,
-        None,
     )
 }
 
@@ -1294,7 +1289,6 @@ fn generate_older_block(rng: &mut TestRng, block: &Block, height_difference: u64
         block.header().height() - height_difference,
         block.protocol_version(),
         false,
-        None,
         None,
     )
 }
@@ -1651,7 +1645,6 @@ async fn block_accumulator_reactor_flow() {
         1,
         ProtocolVersion::V1_0_0,
         false,
-        None,
         None,
     );
     let old_era_signature = FinalitySignature::create(

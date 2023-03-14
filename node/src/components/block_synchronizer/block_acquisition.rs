@@ -385,6 +385,10 @@ impl BlockAcquisitionState {
                         ));
                     };
 
+                    // We managed to read the era validators from the global states of an immediate
+                    // switch block and its parent. We now can check for the signs of any changes
+                    // happening during the upgrade and update the validator matrix with the correct
+                    // set of validators.
                     // `era_id`, being the era of the immediate switch block, will be absent in the
                     // validators stored in the immediate switch block - therefore we will use its
                     // successor for the comparison.
@@ -665,8 +669,7 @@ impl BlockAcquisitionState {
                                 .register_pending_put_tries(put_tries_in_progress);
                         }
                     }
-                    (true, true)
-                    | (false, false) => {},
+                    (true, true) | (false, false) => {}
                 }
             }
             BlockAcquisitionState::HaveBlock(_, _, _, None)
@@ -1020,9 +1023,9 @@ impl BlockAcquisitionState {
                     acquired_parent_block_era_validators
                         .is_acquiring_from_root_hash(&state_root_hash),
                 ) {
-                    (true, true) => {
-                        Err(BlockAcquisitionError::DuplicateGlobalStateAcquisition(state_root_hash))
-                    }
+                    (true, true) => Err(BlockAcquisitionError::DuplicateGlobalStateAcquisition(
+                        state_root_hash,
+                    )),
                     (true, false) => Self::update_era_validators_acquisition_with_trie_or_chunk(
                         acquired_block_era_validators,
                         state_root_hash,
@@ -1073,19 +1076,23 @@ impl BlockAcquisitionState {
                     acquired_parent_block_era_validators
                         .is_acquiring_from_root_hash(&state_root_hash),
                 ) {
-                    (true, true) => {
-                        Err(BlockAcquisitionError::DuplicateGlobalStateAcquisition(state_root_hash))
+                    (true, true) => Err(BlockAcquisitionError::DuplicateGlobalStateAcquisition(
+                        state_root_hash,
+                    )),
+                    (true, false) => {
+                        Self::update_era_validators_acquisition_with_trie_or_chunk_fetch_error(
+                            acquired_block_era_validators,
+                            state_root_hash,
+                            trie_hash,
+                        )
                     }
-                    (true, false) => Self::update_era_validators_acquisition_with_trie_or_chunk_fetch_error(
-                        acquired_block_era_validators,
-                        state_root_hash,
-                        trie_hash,
-                    ),
-                    (false, true) => Self::update_era_validators_acquisition_with_trie_or_chunk_fetch_error(
-                        acquired_parent_block_era_validators,
-                        state_root_hash,
-                        trie_hash,
-                    ),
+                    (false, true) => {
+                        Self::update_era_validators_acquisition_with_trie_or_chunk_fetch_error(
+                            acquired_parent_block_era_validators,
+                            state_root_hash,
+                            trie_hash,
+                        )
+                    }
                     (false, false) => Ok(None),
                 }
             }
@@ -1148,9 +1155,9 @@ impl BlockAcquisitionState {
                     acquired_parent_block_era_validators
                         .is_acquiring_from_root_hash(&state_root_hash),
                 ) {
-                    (true, true) => {
-                        Err(BlockAcquisitionError::DuplicateGlobalStateAcquisition(state_root_hash))
-                    }
+                    (true, true) => Err(BlockAcquisitionError::DuplicateGlobalStateAcquisition(
+                        state_root_hash,
+                    )),
                     (true, false) => Self::update_era_validators_acquisition_with_put_trie_result(
                         acquired_block_era_validators,
                         state_root_hash,
@@ -1249,10 +1256,9 @@ impl BlockAcquisitionState {
         state_root_hash: Digest,
         trie_hash: Digest,
     ) -> Result<Option<Acceptance>, BlockAcquisitionError> {
-        match era_validators_acquisition.register_global_state_trie_or_chunk_fetch_error(
-            state_root_hash,
-            trie_hash,
-        ) {
+        match era_validators_acquisition
+            .register_global_state_trie_or_chunk_fetch_error(state_root_hash, trie_hash)
+        {
             Ok(()) => Ok(Some(Acceptance::NeededIt)),
             Err(EraValidatorsAcquisitionError::AlreadyComplete) => Ok(Some(Acceptance::HadIt)),
             Err(EraValidatorsAcquisitionError::NotAcquiring { .. })
@@ -1330,9 +1336,9 @@ impl BlockAcquisitionState {
                     acquired_parent_block_era_validators
                         .is_acquiring_from_root_hash(&from_state_root_hash),
                 ) {
-                    (true, true) => {
-                        Err(BlockAcquisitionError::DuplicateGlobalStateAcquisition(from_state_root_hash))
-                    }
+                    (true, true) => Err(BlockAcquisitionError::DuplicateGlobalStateAcquisition(
+                        from_state_root_hash,
+                    )),
                     (true, false) => Self::update_era_validators_for_acquisition(
                         acquired_block_era_validators,
                         &from_state_root_hash,

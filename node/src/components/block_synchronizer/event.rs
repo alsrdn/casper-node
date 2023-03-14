@@ -229,7 +229,11 @@ impl Display for Event {
                 )
             }
             Event::BlockHeaderFromStorage(block_hash, _) => {
-                write!(f, "block header from storage response required for syncing block {}", block_hash)
+                write!(
+                    f,
+                    "block header from storage response required for syncing block {}",
+                    block_hash
+                )
             }
         }
     }

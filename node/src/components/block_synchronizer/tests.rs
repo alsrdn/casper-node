@@ -7,8 +7,7 @@ use std::{
 
 use casper_hashing::ChunkWithProof;
 use casper_types::{
-    bytesrepr::Bytes, system::auction::ValidatorWeights, testing::TestRng, EraId, ProtocolVersion,
-    TimeDiff,
+    bytesrepr::Bytes, system::auction::ValidatorWeights, testing::TestRng, EraId, TimeDiff,
 };
 use derive_more::From;
 use rand::Rng;
@@ -96,20 +95,11 @@ fn set_up_have_block_for_historical_builder(
     root_trie_size: usize,
 ) -> (Block, BlockSynchronizer, Vec<NodeId>, TrieRaw) {
     // Set up a random block that we will use to test synchronization
-    let random_deploys = [Deploy::random(rng)];
     let root_trie = random_test_trie(rng, root_trie_size);
-    let era = rng.gen_range(0..6);
-    let height = era * 10 + rng.gen_range(0..10);
-    let is_switch = rng.gen_bool(0.1);
-    let block = Block::random_with_specifics(
-        rng,
-        EraId::from(era),
-        height,
-        ProtocolVersion::V1_0_0,
-        is_switch,
-        random_deploys.iter(),
-        Some(Digest::hash(root_trie.inner())),
-    );
+    let block = TestBlockBuilder::new()
+        .state_root_hash(Digest::hash(root_trie.inner()))
+        .deploys([Deploy::random(rng)].iter())
+        .build(rng);
 
     // Set up a validator matrix for the era in which our test block was created
     let mut validator_matrix = ValidatorMatrix::new_with_validator(ALICE_SECRET_KEY.clone());
@@ -118,7 +108,7 @@ fn set_up_have_block_for_historical_builder(
         iter::once((ALICE_PUBLIC_KEY.clone(), 100.into())).collect(),
     );
 
-    // Create a block synchronizer with a maximum of 5 simultaneous peers
+    // Create a block synchronizer
     let mut block_synchronizer = BlockSynchronizer::new(
         Config::default()
             .with_peer_refresh_interval(TimeDiff::from(Duration::from_secs(10)))
@@ -129,7 +119,7 @@ fn set_up_have_block_for_historical_builder(
     )
     .unwrap();
 
-    // Generate more than 5 peers to see if the peer list changes after a global state sync error
+    // Generate more than peers to be selected for fetching global state data
     let num_peers = rng.gen_range(10..20);
     let peers: Vec<NodeId> = random_peers(rng, num_peers).iter().cloned().collect();
 
@@ -159,6 +149,8 @@ fn set_up_have_block_for_historical_builder(
     (block, block_synchronizer, peers, root_trie)
 }
 
+// Calls need_next for the block_synchronizer and processes the effects resulted returning a list of
+// the new events that were generated
 async fn need_next(
     rng: &mut TestRng,
     reactor: &MockReactor,
@@ -169,7 +161,6 @@ async fn need_next(
     assert_eq!(effects.len(), num_expected_events);
 
     let mut events = Vec::new();
-    // Check if fetches have been issued for the missing children
     for effect in effects.drain(0..) {
         tokio::spawn(async move { effect.await });
         let event = reactor.crank().await;
@@ -186,21 +177,19 @@ async fn global_state_acquisition_is_created_for_historical_builder() {
 
     let historical_builder = block_synchronizer.historical.as_ref().unwrap();
     let acq_state = historical_builder.acquisition_state();
-    let global_state_acq = match acq_state {
-        block_acquisition::BlockAcquisitionState::HaveBlock(_, _, _, ref global_state_acq) => {
-            global_state_acq
-        }
-        _ => unreachable!(),
-    };
 
-    assert_eq!(
-        global_state_acq.as_ref().unwrap().root_hash(),
-        *block.state_root_hash()
-    );
+    // The state of the acquisition should be `HaveBlock`
+    // and a GlobalStateAcquisition object should have been created
+    assert_matches!(acq_state, block_acquisition::BlockAcquisitionState::HaveBlock(_, _, _, ref global_state_acq) => {
+        assert_eq!(
+            global_state_acq.as_ref().unwrap().root_hash(),
+            *block.state_root_hash()
+        );
+    });
 }
 
 #[tokio::test]
-async fn trie_fetch_error_retriggers_fetch_for_same_trie() {
+async fn global_state_trie_fetch_error_retriggers_fetch_for_same_trie() {
     let mut rng = TestRng::new();
     let mock_reactor = MockReactor::new();
 
@@ -230,18 +219,19 @@ async fn trie_fetch_error_retriggers_fetch_for_same_trie() {
         *block.state_root_hash(),
         fetch_result,
     );
-    let event = need_next(&mut rng, &mock_reactor, &mut block_synchronizer, 1)
-        .await
-        .remove(0);
 
     // Check if the peer that did not provide the trie is marked unreliable
-    let historical_builder = block_synchronizer.historical.as_ref().unwrap();
-    assert!(historical_builder
+    assert!(block_synchronizer
+        .historical
+        .as_ref()
+        .unwrap()
         .peer_list()
         .is_peer_unreliable(&selected_peer));
 
     // Check that we got another request to fetch the trie since the last one failed
-    let expected_trie_or_chunk = TrieOrChunkId::new(0, *block.state_root_hash());
+    let event = need_next(&mut rng, &mock_reactor, &mut block_synchronizer, 1)
+        .await
+        .remove(0);
     let peer = assert_matches!(event, MockReactorEvent::TrieOrChunkFetcherRequest(req) => {
         assert_eq!(req.id, expected_trie_or_chunk);
         req.peer
@@ -260,11 +250,19 @@ async fn trie_fetch_error_retriggers_fetch_for_same_trie() {
         *block.state_root_hash(),
         fetch_result,
     );
+
+    // Check if the peer that did not provide the trie is marked unreliable
+    assert!(block_synchronizer
+        .historical
+        .as_ref()
+        .unwrap()
+        .peer_list()
+        .is_peer_reliable(&peer));
+
+    // Now the global state acquisition logic will want to store the trie
     let event = need_next(&mut rng, &mock_reactor, &mut block_synchronizer, 1)
         .await
         .remove(0);
-
-    // Now the global state acquisition logic will want to store the trie
     let trie_to_put = assert_matches!(event, MockReactorEvent::ContractRuntimeRequest(req) => {
         assert_matches!(req, ContractRuntimeRequest::PutTrie { trie_bytes, responder: _ } => {
             trie_bytes
@@ -290,7 +288,7 @@ async fn trie_fetch_error_retriggers_fetch_for_same_trie() {
 }
 
 #[tokio::test]
-async fn global_state_sync_with_multiple_tries() {
+async fn global_state_sync_with_multiple_tries_has_correct_event_order() {
     let mut rng = TestRng::new();
     let mock_reactor = MockReactor::new();
 
@@ -309,9 +307,13 @@ async fn global_state_sync_with_multiple_tries() {
         req.peer
     });
 
-    // Check that the peer was marked as reliable
-    let peer_list = block_synchronizer.historical.as_ref().unwrap().peer_list();
-    assert!(peer_list.is_peer_unknown(&peer));
+    // Check that the peer was marked as unknown before registering the fetch
+    assert!(block_synchronizer
+        .historical
+        .as_ref()
+        .unwrap()
+        .peer_list()
+        .is_peer_unknown(&peer));
 
     // Simulate a successful fetch
     let trie_or_chunk =
@@ -327,9 +329,13 @@ async fn global_state_sync_with_multiple_tries() {
         fetch_result,
     );
 
-    // Check that the peer was marked as reliable
-    let peer_list = block_synchronizer.historical.as_ref().unwrap().peer_list();
-    assert!(peer_list.is_peer_reliable(&peer));
+    // Check that the peer was marked as reliable after the successful fetch
+    assert!(block_synchronizer
+        .historical
+        .as_ref()
+        .unwrap()
+        .peer_list()
+        .is_peer_reliable(&peer));
 
     // Get next action
     let event = need_next(&mut rng, &mock_reactor, &mut block_synchronizer, 1)
@@ -343,6 +349,7 @@ async fn global_state_sync_with_multiple_tries() {
         })
     });
 
+    // Simulate a failure to store the trie because it has missing children
     let missing_tries: Vec<TrieRaw> = (0..5)
         .into_iter()
         .map(|_| random_test_trie(&mut rng, 64))
@@ -363,11 +370,14 @@ async fn global_state_sync_with_multiple_tries() {
     // Check if fetches have been issued for the missing children
     let mut events = need_next(&mut rng, &mock_reactor, &mut block_synchronizer, 5).await;
     for event in events.drain(0..) {
-        assert_matches!(event, MockReactorEvent::TrieOrChunkFetcherRequest(req) if missing_trie_nodes_hashes.contains(&req.id.trie_hash));
+        assert_matches!(
+            event,
+            MockReactorEvent::TrieOrChunkFetcherRequest(req) if missing_trie_nodes_hashes.contains(&req.id.trie_hash)
+        );
     }
 
+    // Simulate successful fetches for the missing children as requested above
     for (idx, hash) in missing_trie_nodes_hashes.iter().enumerate() {
-        // Simulate a successful fetch
         let trie_or_chunk =
             Box::new(TrieOrChunk::new(*hash, missing_tries[idx].clone().into(), 0).unwrap());
         let fetch_result: FetchResult<TrieOrChunk> = Ok(FetchedData::FromPeer {
@@ -389,21 +399,30 @@ async fn global_state_sync_with_multiple_tries() {
                 trie_bytes
             })
         });
-        // Check if global state acquisition is finished
+
+        // Register the put_trie result
         block_synchronizer.put_trie_result(*block.state_root_hash(), *hash, trie_to_put, Ok(*hash));
 
+        // No events will be triggered until the last trie fetch and successful put have been
+        // completed
         if idx < 4 {
             need_next(&mut rng, &mock_reactor, &mut block_synchronizer, 0).await;
         } else {
+            // When all the missing children are stored, we should get a request to put the root
+            // trie (which was awaiting for those children)
             let event = need_next(&mut rng, &mock_reactor, &mut block_synchronizer, 1)
                 .await
                 .remove(0);
             assert_matches!(event, MockReactorEvent::ContractRuntimeRequest(req) => {
-                assert_matches!(req, ContractRuntimeRequest::PutTrie { trie_bytes, responder: _ } if trie_bytes == root_trie);
+                assert_matches!(
+                    req,
+                    ContractRuntimeRequest::PutTrie { trie_bytes, responder: _ } if trie_bytes == root_trie
+                );
             });
         }
     }
 
+    // Simulate a successful put trie and check if the global state synchronization has ended
     block_synchronizer.put_trie_result(
         *block.state_root_hash(),
         *block.state_root_hash(),
@@ -428,6 +447,7 @@ async fn global_state_sync_multi_chunk_tries_successful() {
 
     let (block, mut block_synchronizer, _, root_trie) =
         set_up_have_block_for_historical_builder(&mut rng, ChunkWithProof::CHUNK_SIZE_BYTES * 2);
+
     // At this point, the next step the synchronizer takes should be to get global state
     let event = need_next(&mut rng, &mock_reactor, &mut block_synchronizer, 1)
         .await
@@ -482,6 +502,7 @@ async fn global_state_sync_multi_chunk_tries_successful() {
         fetch_result,
     );
 
+    // Acquisition should resume in a normal flow
     let event = need_next(&mut rng, &mock_reactor, &mut block_synchronizer, 1)
         .await
         .remove(0);
@@ -499,6 +520,7 @@ async fn duplicate_global_state_trie_chunk_fetch_does_not_stall_acquisition() {
 
     let (block, mut block_synchronizer, _, root_trie) =
         set_up_have_block_for_historical_builder(&mut rng, ChunkWithProof::CHUNK_SIZE_BYTES * 2);
+
     // At this point, the next step the synchronizer takes should be to get global state
     let event = need_next(&mut rng, &mock_reactor, &mut block_synchronizer, 1)
         .await
@@ -570,6 +592,7 @@ async fn global_state_trie_fetch_validation_programming_error_aborts_historical_
 
     let (block, mut block_synchronizer, _, root_trie) =
         set_up_have_block_for_historical_builder(&mut rng, ChunkWithProof::CHUNK_SIZE_BYTES * 2);
+
     // At this point, the next step the synchronizer takes should be to get global state
     let event = need_next(&mut rng, &mock_reactor, &mut block_synchronizer, 1)
         .await
@@ -582,7 +605,7 @@ async fn global_state_trie_fetch_validation_programming_error_aborts_historical_
         req.peer
     });
 
-    // Simulate a successful fetch for the first chunk
+    // Simulate a successful fetch for the first chunk (chunk 0)
     let trie_or_chunk =
         Box::new(TrieOrChunk::new(*block.state_root_hash(), root_trie.clone().into(), 0).unwrap());
     assert_matches!(
@@ -612,7 +635,7 @@ async fn global_state_trie_fetch_validation_programming_error_aborts_historical_
     });
 
     // Simulate a successful fetch for an invalid trie_or_chunk
-    // This wouldn't be allowed by the fetch validation logic
+    // This wouldn't be allowed by the fetcher validation logic
     // but we are forcing it here to test if the sync is aborted on error
     let trie_or_chunk = Box::new(
         TrieOrChunk::new(
@@ -622,7 +645,7 @@ async fn global_state_trie_fetch_validation_programming_error_aborts_historical_
         )
         .unwrap(),
     );
-    assert!(trie_or_chunk.validate(&EmptyValidationMetadata).is_err());
+    assert!(trie_or_chunk.validate(&EmptyValidationMetadata).is_err()); // actually invalid
     let fetch_result: FetchResult<TrieOrChunk> = Ok(FetchedData::FromPeer {
         peer: selected_peer,
         item: trie_or_chunk,
@@ -634,6 +657,7 @@ async fn global_state_trie_fetch_validation_programming_error_aborts_historical_
         fetch_result,
     );
 
+    // Check if the synchronizer failed
     let historical_builder = block_synchronizer.historical.as_ref().unwrap();
     assert_matches!(
         historical_builder.acquisition_state(),
@@ -649,8 +673,9 @@ async fn peers_refreshed_when_repeatedly_failing_to_fetch_global_state() {
     let (block, mut block_synchronizer, peers, _) =
         set_up_have_block_for_historical_builder(&mut rng, 64);
 
+    // Try to fetch the root trie until we exhaust the whole peer set;
+    // each time simulate a failed fetch
     for _ in 0..peers.len() {
-        // At this point, the next step the synchronizer takes should be to get global state
         let event = need_next(&mut rng, &mock_reactor, &mut block_synchronizer, 1)
             .await
             .remove(0);
@@ -662,9 +687,13 @@ async fn peers_refreshed_when_repeatedly_failing_to_fetch_global_state() {
             req.peer
         });
 
-        // Check that the peer was marked as reliable
-        let peer_list = block_synchronizer.historical.as_ref().unwrap().peer_list();
-        assert!(peer_list.is_peer_unknown(&selected_peer));
+        // Check that the peer was marked as unknown
+        assert!(block_synchronizer
+            .historical
+            .as_ref()
+            .unwrap()
+            .peer_list()
+            .is_peer_unknown(&selected_peer));
 
         // Simulate that we did not get the trie
         let fetch_result: FetchResult<TrieOrChunk> = Err(FetcherError::Absent {
@@ -679,12 +708,17 @@ async fn peers_refreshed_when_repeatedly_failing_to_fetch_global_state() {
         );
 
         // Check if the peer that did not provide the trie is marked unreliable
-        let historical_builder = block_synchronizer.historical.as_ref().unwrap();
-        assert!(historical_builder
+        assert!(block_synchronizer
+            .historical
+            .as_ref()
+            .unwrap()
             .peer_list()
             .is_peer_unreliable(&selected_peer));
     }
 
+    // By this point all peers are unreliable since all requests to fetch from them have yielded
+    // errors. The global state acquisition logic will continue to retry unreliable peers until
+    // the peer list is refreshed.
     let event = need_next(&mut rng, &mock_reactor, &mut block_synchronizer, 1)
         .await
         .remove(0);
@@ -693,11 +727,12 @@ async fn peers_refreshed_when_repeatedly_failing_to_fetch_global_state() {
         assert_eq!(req.id, expected_trie_or_chunk);
         req.peer
     });
-
-    // By this point all peers are unreliable since all requests to fetch from them have yielded
-    // errors
-    let peer_list = block_synchronizer.historical.as_ref().unwrap().peer_list();
-    assert!(peer_list.is_peer_unreliable(&selected_peer));
+    assert!(block_synchronizer
+        .historical
+        .as_ref()
+        .unwrap()
+        .peer_list()
+        .is_peer_unreliable(&selected_peer));
 
     // Simulate that we did not get the trie
     let fetch_result: FetchResult<TrieOrChunk> = Err(FetcherError::Absent {
@@ -713,6 +748,9 @@ async fn peers_refreshed_when_repeatedly_failing_to_fetch_global_state() {
 
     // Wait for peer refresh interval to elapse
     std::thread::sleep(Duration::from_secs(10));
+
+    // Now the block synchronizer should try to get new peers form both the accumulator and from the
+    // peer set
     let events = need_next(&mut rng, &mock_reactor, &mut block_synchronizer, 2).await;
     assert_matches!(
         events[0],
@@ -723,11 +761,12 @@ async fn peers_refreshed_when_repeatedly_failing_to_fetch_global_state() {
         MockReactorEvent::BlockAccumulatorRequest(BlockAccumulatorRequest::GetPeersForBlock { .. })
     );
 
-    // Generate more than 5 peers to see if the peer list changes after a global state sync error
+    // Generate some more peers to register to the synchronizer
     let num_peers = rng.gen_range(10..20);
     let peers: Vec<NodeId> = random_peers(&mut rng, num_peers).iter().cloned().collect();
     block_synchronizer.register_peers(*block.hash(), peers.clone());
 
+    // Now the synchronizer should resume fetching tries for global state
     let event = need_next(&mut rng, &mock_reactor, &mut block_synchronizer, 1)
         .await
         .remove(0);
@@ -736,9 +775,15 @@ async fn peers_refreshed_when_repeatedly_failing_to_fetch_global_state() {
         assert_eq!(req.id, expected_trie_or_chunk);
         req.peer
     });
+
+    // Check that the peer was selected from the newly registered peer set
     assert!(peers.contains(&selected_peer));
-    let peer_list = block_synchronizer.historical.as_ref().unwrap().peer_list();
-    assert!(peer_list.is_peer_unknown(&selected_peer));
+    assert!(block_synchronizer
+        .historical
+        .as_ref()
+        .unwrap()
+        .peer_list()
+        .is_peer_unknown(&selected_peer));
 }
 
 #[tokio::test]
@@ -761,9 +806,13 @@ async fn global_state_sync_does_not_exceed_maximum_parallel_trie_fetches() {
         req.peer
     });
 
-    // Check that the peer was marked as reliable
-    let peer_list = block_synchronizer.historical.as_ref().unwrap().peer_list();
-    assert!(peer_list.is_peer_unknown(&peer));
+    // Check that the peer was marked as unknown
+    assert!(block_synchronizer
+        .historical
+        .as_ref()
+        .unwrap()
+        .peer_list()
+        .is_peer_unknown(&peer));
 
     // Simulate a successful fetch
     let trie_or_chunk =
@@ -780,8 +829,12 @@ async fn global_state_sync_does_not_exceed_maximum_parallel_trie_fetches() {
     );
 
     // Check that the peer was marked as reliable
-    let peer_list = block_synchronizer.historical.as_ref().unwrap().peer_list();
-    assert!(peer_list.is_peer_reliable(&peer));
+    assert!(block_synchronizer
+        .historical
+        .as_ref()
+        .unwrap()
+        .peer_list()
+        .is_peer_reliable(&peer));
 
     // Get next action
     let event = need_next(&mut rng, &mock_reactor, &mut block_synchronizer, 1)
@@ -795,6 +848,8 @@ async fn global_state_sync_does_not_exceed_maximum_parallel_trie_fetches() {
         })
     });
 
+    // Generate a list of missing children which is larger than the number of maximum parallel trie
+    // fetches allowed
     let missing_tries: Vec<TrieRaw> = (0..15)
         .into_iter()
         .map(|_| random_test_trie(&mut rng, 64))
@@ -811,7 +866,9 @@ async fn global_state_sync_does_not_exceed_maximum_parallel_trie_fetches() {
             missing_trie_nodes_hashes.clone(),
         )),
     );
-    // Check if fetches have been issued for the missing children
+
+    // Check the number of fetches have been issued for the missing children
+    // This should be the max_parallel_trie_fetches limit
     let mut events = need_next(&mut rng, &mock_reactor, &mut block_synchronizer, 10).await;
     for event in events.drain(0..) {
         assert_matches!(event, MockReactorEvent::TrieOrChunkFetcherRequest(req) if missing_trie_nodes_hashes.contains(&req.id.trie_hash));
@@ -823,14 +880,14 @@ async fn sync_validator_weights_from_global_state() {
     let mut rng = TestRng::new();
     let mock_reactor = MockReactor::new();
 
-    // Set up a validator matrix for the era in which our test block was created
+    // Set up a validator matrix with one era initialized
     let mut validator_matrix = ValidatorMatrix::new_with_validator(ALICE_SECRET_KEY.clone());
     validator_matrix.register_validator_weights(
         EraId::from(2),
         iter::once((ALICE_PUBLIC_KEY.clone(), 100.into())).collect(),
     );
 
-    // Create a block synchronizer with a maximum of 5 simultaneous peers
+    // Create a block synchronizer
     let mut block_synchronizer = BlockSynchronizer::new(
         Config::default()
             .with_peer_refresh_interval(TimeDiff::from(Duration::from_secs(10)))
@@ -841,6 +898,7 @@ async fn sync_validator_weights_from_global_state() {
     )
     .unwrap();
 
+    // Create 2 switch blocks
     let parent_root_trie = random_test_trie(&mut rng, 64);
     let parent_block = TestBlockBuilder::new()
         .state_root_hash(Digest::hash(parent_root_trie.inner()))
@@ -860,11 +918,12 @@ async fn sync_validator_weights_from_global_state() {
         .parent_hash(*parent_block.hash())
         .build(&mut rng);
 
-    // Generate more than 5 peers to see if the peer list changes after a global state sync error
+    // Generate and register some peers to be used by the synchronizer
     let num_peers = rng.gen_range(10..20);
     let peers: Vec<NodeId> = random_peers(&mut rng, num_peers).iter().cloned().collect();
 
-    // Set up the synchronizer for the test block such that the next step is getting global state
+    // Set up the synchronizer for the test block and mark that it should get the missing era
+    // validator weights from global state
     block_synchronizer.register_block_by_hash(*block.hash(), true, true, true);
     assert!(block_synchronizer.historical.is_some()); // we only get global state on historical sync
     block_synchronizer.register_peers(*block.hash(), peers.clone());
@@ -875,6 +934,7 @@ async fn sync_validator_weights_from_global_state() {
         assert_matches!(event, MockReactorEvent::BlockHeaderFetcherRequest(req) if req.id == *block.hash());
     }
 
+    // Register the block header
     let fetch_result: FetchResult<BlockHeader> = Ok(FetchedData::FromStorage {
         item: Box::new(block.header().clone()),
     });
@@ -885,7 +945,7 @@ async fn sync_validator_weights_from_global_state() {
         .remove(0);
 
     // Since there are no era validator weights for the block era, the synchronizer should try and
-    // get them from storage
+    // get them from global state
     assert_matches!(event, MockReactorEvent::ContractRuntimeRequest(req) => {
         assert_matches!(req, ContractRuntimeRequest::GetEraValidators{request, responder: _} => {
             assert_eq!(request.state_hash(), *block.state_root_hash());
@@ -893,6 +953,8 @@ async fn sync_validator_weights_from_global_state() {
         })
     });
 
+    // Simulate that we have the global state for this block and return some validator weights for
+    // its era
     let era_validator_weights: ValidatorWeights = BTreeMap::from([
         (BOB_PUBLIC_KEY.clone(), 100.into()),
         (CAROL_PUBLIC_KEY.clone(), 200.into()),
@@ -906,6 +968,7 @@ async fn sync_validator_weights_from_global_state() {
         era_validators_get_response,
     );
 
+    // Next we require the parent of the block to check its global state for era validators
     let event = need_next(&mut rng, &mock_reactor, &mut block_synchronizer, 1)
         .await
         .remove(0);
@@ -916,15 +979,17 @@ async fn sync_validator_weights_from_global_state() {
         })
     });
 
-    block_synchronizer
-        .register_block_header_requested_from_storage(*block.hash(), Some(parent_block.clone().take_header()));
+    block_synchronizer.register_block_header_requested_from_storage(
+        *block.hash(),
+        Some(parent_block.clone().take_header()),
+    );
 
+    // Since there are no era validator weights for the parent block era, the synchronizer should
+    // try and get them from global state
     let event = need_next(&mut rng, &mock_reactor, &mut block_synchronizer, 1)
         .await
         .remove(0);
 
-    // Since there are no era validator weights for the block era, the synchronizer should try and
-    // get them from storage
     assert_matches!(event, MockReactorEvent::ContractRuntimeRequest(req) => {
         assert_matches!(req, ContractRuntimeRequest::GetEraValidators{request, responder: _} => {
             assert_eq!(request.state_hash(), *parent_block.state_root_hash());
@@ -932,16 +997,17 @@ async fn sync_validator_weights_from_global_state() {
         })
     });
 
+    // Simulate that we don't have the global state for the parent block
     block_synchronizer.register_era_validators_from_contract_runtime(
         *parent_block.state_root_hash(),
         Err(EraValidatorsGetError::RootNotFound),
     );
 
+    // Expect to get a request to fetch a trie for the parent global state
     let event = need_next(&mut rng, &mock_reactor, &mut block_synchronizer, 1)
         .await
         .remove(0);
 
-    // Expect to get a request to fetch a trie
     let expected_trie_or_chunk = TrieOrChunkId::new(0, *parent_block.state_root_hash());
     let selected_peer = assert_matches!(event, MockReactorEvent::TrieOrChunkFetcherRequest(req) => {
         assert_eq!(req.id, expected_trie_or_chunk);
@@ -968,12 +1034,11 @@ async fn sync_validator_weights_from_global_state() {
         fetch_result,
     );
 
-    // Expect to get a request to fetch chunk 1
+    // Now the global state acquisition logic will want to store the trie
     let event = need_next(&mut rng, &mock_reactor, &mut block_synchronizer, 1)
         .await
         .remove(0);
 
-    // Now the global state acquisition logic will want to store the trie
     let trie_to_put = assert_matches!(event, MockReactorEvent::ContractRuntimeRequest(req) => {
         assert_matches!(req, ContractRuntimeRequest::PutTrie { trie_bytes, responder: _ } => {
             trie_bytes
@@ -991,8 +1056,7 @@ async fn sync_validator_weights_from_global_state() {
         .await
         .remove(0);
 
-    // Since there are no era validator weights for the block era, the synchronizer should try and
-    // get them from storage
+    // Try to get the era validators for the parent block again
     assert_matches!(event, MockReactorEvent::ContractRuntimeRequest(req) => {
         assert_matches!(req, ContractRuntimeRequest::GetEraValidators{request, responder: _} => {
             assert_eq!(request.state_hash(), *parent_block.state_root_hash());
@@ -1000,6 +1064,7 @@ async fn sync_validator_weights_from_global_state() {
         })
     });
 
+    // Register the era validators received from contract runtime
     let era_4_validator_weights: ValidatorWeights = BTreeMap::from([
         (BOB_PUBLIC_KEY.clone(), 100.into()),
         (CAROL_PUBLIC_KEY.clone(), 200.into()),
@@ -1013,21 +1078,29 @@ async fn sync_validator_weights_from_global_state() {
         era_validators_get_response,
     );
 
+    // Expect a request to update the validator matrix
     let event = need_next(&mut rng, &mock_reactor, &mut block_synchronizer, 1)
         .await
         .remove(0);
 
-    let validator_weights = assert_matches!(event, MockReactorEvent::UpdateEraValidatorsRequest(req) => {
-        assert_matches!(req, UpdateEraValidatorsRequest {era_id, validators_to_register } => {
-            assert_eq!(era_id, EraId::from(4));
-            validators_to_register
-        })
-    });
+    let validator_weights = assert_matches!(
+        event,
+        MockReactorEvent::UpdateEraValidatorsRequest(req) => {
+            assert_matches!(req, UpdateEraValidatorsRequest {era_id, validators_to_register } => {
+                assert_eq!(era_id, EraId::from(4));
+                validators_to_register
+            })
+        }
+    );
 
+    // When the request reaches the main reactor, it will update the validator matrix and notify the
+    // block synchronizer
     block_synchronizer
         .validator_matrix
         .register_validator_weights(EraId::from(4), validator_weights);
     let mut effects = block_synchronizer.handle_validators(mock_reactor.effect_builder(), &mut rng);
+
+    // Check that the next step was triggered in the block synchronizer
     for effect in effects.drain(0..) {
         tokio::spawn(async move { effect.await });
         let event = mock_reactor.crank().await;

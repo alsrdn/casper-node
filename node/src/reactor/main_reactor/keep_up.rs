@@ -303,15 +303,7 @@ impl MainReactor {
                             // global states of the block and its parent and compare them in order
                             // to decide which validators to use - might
                             // require syncing global states in
-                            // the process.
-                            /*
-                            Some(self.try_read_validators_for_immediate_switch_block(
-                                effect_builder,
-                                parent_hash,
-                                era_id,
-                                parent_metadata,
-                            ))
-                            */
+                            // the process; this is handled by the block synchronizer.
                             Some(self.sync_back_register(effect_builder, rng, parent_hash, true))
                         }
                     }
@@ -511,9 +503,9 @@ impl MainReactor {
                         // note: there is a special case here where the parent might be an
                         // immediate switch block - we check for that case by attempting to read
                         // its parent and seeing whether it is also a switch block; if it is, we
-                        // pass the parent metadata on in the Sync instruction, so that we can read
-                        // the correct set of validators if the validators matrix doesn't have the
-                        // validators for the parent's era yet
+                        // pass get_evw_from_global_state on in the Sync instruction, so that we
+                        // can read the correct set of validators in the block synchronizer if the
+                        // validators matrix doesn't have the validators for the parent's era yet
                         let get_evw_from_global_state = self
                             .storage
                             .read_block_header(parent_block_header.parent_hash())

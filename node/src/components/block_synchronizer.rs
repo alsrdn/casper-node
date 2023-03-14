@@ -557,7 +557,11 @@ impl BlockSynchronizer {
         }
     }
 
-    fn register_block_header_requested_from_storage(&mut self, requested_for_block: BlockHash, block_header: Option<BlockHeader>) {
+    fn register_block_header_requested_from_storage(
+        &mut self,
+        requested_for_block: BlockHash,
+        block_header: Option<BlockHeader>,
+    ) {
         if let Some(builder) = &mut self.historical {
             if builder.block_hash() != requested_for_block {
                 debug!(%requested_for_block, "BlockSynchronizer: not currently synchronizing block");
@@ -852,11 +856,14 @@ impl BlockSynchronizer {
                                 .ignore(),
                         );
                     }
-                    NeedNext::BlockHeaderFromStorage(requested_for_block, block_hash) => results.extend(
-                        effect_builder
-                            .get_block_header_from_storage(block_hash, false)
-                            .event(move |block_header| Event::BlockHeaderFromStorage(requested_for_block, block_header)),
-                    ),
+                    NeedNext::BlockHeaderFromStorage(requested_for_block, block_hash) => results
+                        .extend(
+                            effect_builder
+                                .get_block_header_from_storage(block_hash, false)
+                                .event(move |block_header| {
+                                    Event::BlockHeaderFromStorage(requested_for_block, block_header)
+                                }),
+                        ),
                 }
             };
 
@@ -1541,7 +1548,10 @@ impl<REv: ReactorEvent> Component<REv> for BlockSynchronizer {
                     self.need_next(effect_builder, rng)
                 }
                 Event::BlockHeaderFromStorage(requested_for_block, block_header) => {
-                    self.register_block_header_requested_from_storage(requested_for_block, block_header);
+                    self.register_block_header_requested_from_storage(
+                        requested_for_block,
+                        block_header,
+                    );
                     self.need_next(effect_builder, rng)
                 }
             },

@@ -1070,11 +1070,6 @@ impl reactor::Reactor for MainReactor {
                 MainEvent::Storage,
                 self.storage.handle_event(effect_builder, rng, req.into()),
             ),
-
-            // This event gets emitted when we manage to read the era validators from the global
-            // states of an immediate switch block and its parent. Once that happens, we can check
-            // for the signs of any changes happening during the upgrade and register the correct
-            // set of validators in the validators matrix.
             MainEvent::UpdateEraValidatorsRequest(req) => {
                 let mut effects = self.update_validator_weights(
                     effect_builder,

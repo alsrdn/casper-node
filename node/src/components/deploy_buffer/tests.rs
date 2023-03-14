@@ -336,7 +336,6 @@ fn have_full_ttl_worth_of_deploys() {
         ProtocolVersion::V1_0_0,
         true,
         None,
-        None,
     );
     deploy_buffer.register_block(&switch_block);
     // buffer should not have ttl worth of deploys since all blocks were created with recent

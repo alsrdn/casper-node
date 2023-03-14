@@ -117,7 +117,10 @@ impl BlockAcquisitionAction {
         }
     }
 
-    pub(super) fn get_block_header_from_storage(needed_for_block: BlockHash, block_hash: BlockHash) -> Self {
+    pub(super) fn get_block_header_from_storage(
+        needed_for_block: BlockHash,
+        block_hash: BlockHash,
+    ) -> Self {
         BlockAcquisitionAction {
             peers_to_ask: Vec::new(),
             need_next: NeedNext::BlockHeaderFromStorage(needed_for_block, block_hash),

@@ -1448,7 +1448,6 @@ impl Block {
             ProtocolVersion::V1_0_0,
             is_switch,
             deploys_iter,
-            None,
         )
     }
 
@@ -1467,13 +1466,8 @@ impl Block {
         protocol_version: ProtocolVersion,
         is_switch: bool,
         deploys_iter: I,
-        state_root_hash: Option<Digest>,
     ) -> Self {
-        let state_root_hash = if let Some(root_hash) = state_root_hash {
-            root_hash
-        } else {
-            rng.gen::<[u8; Digest::LENGTH]>().into()
-        };
+        let state_root_hash = rng.gen::<[u8; Digest::LENGTH]>().into();
         let finalized_block = FinalizedBlock::random_with_specifics(
             rng,
             era_id,
@@ -1563,7 +1557,6 @@ impl Block {
             height,
             ProtocolVersion::V1_0_0,
             is_switch,
-            None,
             None,
         );
         block.hash = BlockHash::random(rng);
