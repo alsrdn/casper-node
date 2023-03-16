@@ -1,3 +1,5 @@
+pub(crate) mod test_utils;
+
 use std::{
     collections::{BTreeMap, HashSet},
     iter,
@@ -35,6 +37,7 @@ enum MockReactorEvent {
     FinalitySignatureFetcherRequest(FetcherRequest<FinalitySignature>),
     TrieOrChunkFetcherRequest(FetcherRequest<TrieOrChunk>),
     BlockExecutionResultsOrChunkFetcherRequest(FetcherRequest<BlockExecutionResultsOrChunk>),
+    SyncLeapFetcherRequest(FetcherRequest<SyncLeap>),
     NetworkInfoRequest(NetworkInfoRequest),
     BlockAccumulatorRequest(BlockAccumulatorRequest),
     PeerBehaviorAnnouncement(PeerBehaviorAnnouncement),
@@ -113,6 +116,7 @@ fn set_up_have_block_for_historical_builder(
         Config::default()
             .with_peer_refresh_interval(TimeDiff::from(Duration::from_secs(10)))
             .with_max_parallel_trie_fetches(10),
+        Arc::new(Chainspec::random(rng)),
         5,
         validator_matrix,
         &prometheus::Registry::new(),
@@ -176,7 +180,7 @@ async fn global_state_acquisition_is_created_for_historical_builder() {
     let (block, block_synchronizer, _, _) = set_up_have_block_for_historical_builder(&mut rng, 64);
 
     let historical_builder = block_synchronizer.historical.as_ref().unwrap();
-    let acq_state = historical_builder.acquisition_state();
+    let acq_state = historical_builder.block_acquisition_state();
 
     // The state of the acquisition should be `HaveBlock`
     // and a GlobalStateAcquisition object should have been created
@@ -660,7 +664,7 @@ async fn global_state_trie_fetch_validation_programming_error_aborts_historical_
     // Check if the synchronizer failed
     let historical_builder = block_synchronizer.historical.as_ref().unwrap();
     assert_matches!(
-        historical_builder.acquisition_state(),
+        historical_builder.block_acquisition_state(),
         block_acquisition::BlockAcquisitionState::Failed(..)
     );
 }
@@ -892,6 +896,7 @@ async fn sync_validator_weights_from_global_state() {
         Config::default()
             .with_peer_refresh_interval(TimeDiff::from(Duration::from_secs(10)))
             .with_max_parallel_trie_fetches(10),
+        Arc::new(Chainspec::random(&mut rng)),
         5,
         validator_matrix,
         prometheus::default_registry(),

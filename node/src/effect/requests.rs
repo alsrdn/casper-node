@@ -1110,15 +1110,6 @@ pub(crate) enum BlockAccumulatorRequest {
         block_hash: BlockHash,
         responder: Responder<Option<Vec<NodeId>>>,
     },
-    GetBlock {
-        block_hash: BlockHash,
-        responder: Responder<Option<Arc<Block>>>,
-    },
-    GetFinalitySignature {
-        block_hash: BlockHash,
-        public_key: PublicKey,
-        responder: Responder<Option<FinalitySignature>>,
-    },
 }
 
 impl Display for BlockAccumulatorRequest {
@@ -1126,20 +1117,6 @@ impl Display for BlockAccumulatorRequest {
         match self {
             BlockAccumulatorRequest::GetPeersForBlock { block_hash, .. } => {
                 write!(f, "get peers for {}", block_hash)
-            }
-            BlockAccumulatorRequest::GetBlock { block_hash, .. } => {
-                write!(f, "get block for {}", block_hash)
-            }
-            BlockAccumulatorRequest::GetFinalitySignature {
-                block_hash,
-                public_key,
-                ..
-            } => {
-                write!(
-                    f,
-                    "get finality signature of {} for {}",
-                    public_key, block_hash
-                )
             }
         }
     }

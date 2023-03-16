@@ -15,7 +15,7 @@ use casper_hashing::Digest;
 use casper_types::{system::auction::EraValidators, EraId, PublicKey, TimeDiff, Timestamp};
 
 use super::{
-    block_acquisition::{Acceptance, BlockAcquisitionState},
+    block_acquisition::{Acceptance, BlockAcquisitionState, NextActionConfig},
     block_acquisition_action::BlockAcquisitionAction,
     event::EraValidatorsGetError,
     execution_results_acquisition::{self, ExecutionResultsChecksum},
@@ -25,9 +25,9 @@ use super::{
 };
 use crate::{
     types::{
-        ApprovalsHashes, Block, BlockExecutionResultsOrChunk, BlockHash, BlockHeader,
-        BlockSignatures, DeployHash, DeployId, EraValidatorWeights, FinalitySignature, NodeId,
-        TrieOrChunk, ValidatorMatrix,
+        chainspec::LegacyRequiredFinality, ApprovalsHashes, Block, BlockExecutionResultsOrChunk,
+        BlockHash, BlockHeader, BlockSignatures, DeployHash, DeployId, EraValidatorWeights,
+        FinalitySignature, NodeId, TrieOrChunk, ValidatorMatrix,
     },
     NodeRng,
 };
@@ -355,6 +355,7 @@ impl BlockBuilder {
         rng: &mut NodeRng,
         max_simultaneous_peers: usize,
         max_parallel_trie_fetches: usize,
+        legacy_required_finality: LegacyRequiredFinality,
     ) -> BlockAcquisitionAction {
         match self.peer_list.need_peers() {
             PeersStatus::Sufficient => {
@@ -377,6 +378,7 @@ impl BlockBuilder {
         }
         let era_id = match self.era_id {
             None => {
+                // if we don't have the era_id, we only have block_hash, thus get block_header
                 return BlockAcquisitionAction::block_header(&self.peer_list, rng, self.block_hash);
             }
             Some(era_id) => era_id,
@@ -386,18 +388,26 @@ impl BlockBuilder {
                 if self.should_fetch_execution_state() && self.get_evw_from_global_state {
                     None
                 } else {
-                    return BlockAcquisitionAction::era_validators(era_id);
+                    return BlockAcquisitionAction::era_validators(&self.peer_list, rng, era_id);
                 }
             }
-            Some(validator_weights) => Some(validator_weights),
+            Some(validator_weights) => {
+                if validator_weights.is_empty() {
+                    return BlockAcquisitionAction::era_validators(&self.peer_list, rng, era_id);
+                }
+                Some(validator_weights)
+            }
         };
         match self.acquisition_state.next_action(
             &self.peer_list,
             validator_weights,
             rng,
             self.should_fetch_execution_state,
-            max_simultaneous_peers,
-            max_parallel_trie_fetches,
+            NextActionConfig {
+                legacy_required_finality,
+                max_simultaneous_peers,
+                max_parallel_trie_fetches,
+            },
         ) {
             Ok(ret) => ret,
             Err(err) => {

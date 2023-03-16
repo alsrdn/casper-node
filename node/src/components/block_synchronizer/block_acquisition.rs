@@ -18,8 +18,9 @@ use crate::{
         ExecutionResultsAcquisition, ExecutionResultsChecksum,
     },
     types::{
-        ApprovalsHashes, Block, BlockExecutionResultsOrChunk, BlockHash, BlockHeader, DeployHash,
-        DeployId, EraValidatorWeights, FinalitySignature, SignatureWeight, TrieOrChunk,
+        chainspec::LegacyRequiredFinality, ApprovalsHashes, Block, BlockExecutionResultsOrChunk,
+        BlockHash, BlockHeader, DeployHash, DeployId, EraValidatorWeights, FinalitySignature,
+        SignatureWeight, TrieOrChunk,
     },
     NodeRng,
 };
@@ -237,6 +238,12 @@ pub(super) enum Acceptance {
     NeededIt,
 }
 
+pub(super) struct NextActionConfig {
+    pub(super) legacy_required_finality: LegacyRequiredFinality,
+    pub(super) max_simultaneous_peers: usize,
+    pub(super) max_parallel_trie_fetches: usize,
+}
+
 #[cfg_attr(doc, aquamarine::aquamarine)]
 /// ```mermaid
 /// sequenceDiagram
@@ -295,8 +302,7 @@ impl BlockAcquisitionState {
         validator_weights: Option<&EraValidatorWeights>,
         rng: &mut NodeRng,
         is_historical: bool,
-        max_simultaneous_peers: usize,
-        max_parallel_trie_fetches: usize,
+        restrictions: NextActionConfig,
     ) -> Result<BlockAcquisitionAction, BlockAcquisitionError> {
         // self is the resting state we are in, ret is the next action that should be taken
         // to acquire the necessary data to get us to the next step (if any), or an error
@@ -312,32 +318,26 @@ impl BlockAcquisitionState {
                 parent_block_header,
             } => {
                 if let Some(validator_weights) = validator_weights {
-                    if validator_weights.is_empty() {
-                        Ok(BlockAcquisitionAction::era_validators(
-                            validator_weights.era_id(),
-                        ))
-                    } else {
-                        // Collect signatures with Vacant state or which are currently missing from
-                        // the SignatureAcquisition.
-                        let mut missing_signatures: HashSet<PublicKey> = validator_weights
-                            .missing_validators(acquired_signatures.not_vacant())
-                            .cloned()
-                            .collect();
-                        // If there are too few, retry any in Pending state.
-                        if missing_signatures.len() < max_simultaneous_peers {
-                            missing_signatures.extend(
-                                validator_weights
-                                    .missing_validators(acquired_signatures.not_pending())
-                                    .cloned(),
-                            );
-                        }
-                        Ok(BlockAcquisitionAction::finality_signatures(
-                            peer_list,
-                            rng,
-                            header,
-                            missing_signatures.into_iter().collect(),
-                        ))
+                    // Collect signatures with Vacant state or which are currently missing from
+                    // SignatureAcquisition.
+                    let mut missing_signatures: HashSet<PublicKey> = validator_weights
+                        .missing_validators(acquired_signatures.not_vacant())
+                        .cloned()
+                        .collect();
+                    // If there are too few, retry any in Pending state.
+                    if missing_signatures.len() < restrictions.max_simultaneous_peers {
+                        missing_signatures.extend(
+                            validator_weights
+                                .missing_validators(acquired_signatures.not_pending())
+                                .cloned(),
+                        );
                     }
+                    Ok(BlockAcquisitionAction::finality_signatures(
+                        peer_list,
+                        rng,
+                        header,
+                        missing_signatures.into_iter().collect(),
+                    ))
                 } else {
                     let era_id = header.era_id();
 
@@ -355,7 +355,7 @@ impl BlockAcquisitionState {
                                 block_protocol_version,
                                 rng,
                                 peer_list,
-                                max_parallel_trie_fetches,
+                                restrictions.max_parallel_trie_fetches,
                             );
                         }
                     };
@@ -374,7 +374,7 @@ impl BlockAcquisitionState {
                                     parent_block_protocol_version,
                                     rng,
                                     peer_list,
-                                    max_parallel_trie_fetches,
+                                    restrictions.max_parallel_trie_fetches,
                                 );
                             }
                         }
@@ -448,7 +448,7 @@ impl BlockAcquisitionState {
                         *block.hash(),
                         *block.state_root_hash(),
                         global_state_acquisition,
-                        max_parallel_trie_fetches,
+                        restrictions.max_parallel_trie_fetches,
                     ))
                 } else if deploys.needs_deploy().is_some() {
                     Ok(BlockAcquisitionAction::approvals_hashes(
@@ -468,6 +468,7 @@ impl BlockAcquisitionState {
                         validator_weights,
                         signatures,
                         is_historical,
+                        restrictions.legacy_required_finality,
                     ))
                 }
             }
@@ -500,6 +501,7 @@ impl BlockAcquisitionState {
                         validator_weights,
                         signatures,
                         is_historical,
+                        restrictions.legacy_required_finality,
                     ))
                 }
             }
@@ -530,6 +532,7 @@ impl BlockAcquisitionState {
                         signatures,
                         deploys.needs_deploy(),
                         is_historical,
+                        restrictions.legacy_required_finality,
                     ))
                 }
             }
@@ -546,6 +549,7 @@ impl BlockAcquisitionState {
                         signatures,
                         deploys.needs_deploy(),
                         is_historical,
+                        restrictions.legacy_required_finality,
                     ))
                 } else {
                     Err(BlockAcquisitionError::MissingEraValidatorWeights)
@@ -560,6 +564,7 @@ impl BlockAcquisitionState {
                         validator_weights,
                         signatures,
                         is_historical,
+                        restrictions.legacy_required_finality,
                     ))
                 } else {
                     Err(BlockAcquisitionError::MissingEraValidatorWeights)
