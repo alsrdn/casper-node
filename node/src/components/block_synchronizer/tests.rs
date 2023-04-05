@@ -9,7 +9,9 @@ use std::{
     time::Duration,
 };
 
-use casper_types::{AccessRights, CLValue, EraId, PublicKey, SecretKey, StoredValue, URef, U512};
+use casper_types::{
+    AccessRights, CLValue, EraId, PublicKey, SecretKey, StoredValue, TimeDiff, URef, U512,
+};
 use derive_more::From;
 use rand::{
     distributions::{Distribution, Standard},
@@ -578,17 +580,24 @@ async fn sync_starts_with_header_fetch() {
     }
 }
 
-//TODO: remove this ignore when the synchronizer can recover from the stall
-#[ignore]
 #[tokio::test]
-async fn fwd_sync_is_not_blocked_by_failed_header_fetch_within_latch_interval() {
+async fn fwd_sync_is_reported_stalled_if_failed_header_fetches_arrive_within_latch_interval() {
     let mut rng = TestRng::new();
     let mock_reactor = MockReactor::new();
     let test_env: TestEnv = rng.gen();
     let block = test_env.block();
     let peers = test_env.peers();
     let validator_matrix = test_env.gen_validator_matrix();
-    let mut block_synchronizer = BlockSynchronizer::new_initialized(&mut rng, validator_matrix);
+    let mut block_synchronizer_config = Config::default();
+    block_synchronizer_config.progress_stall_threshold_interval = TimeDiff::from_seconds(15);
+    let mut block_synchronizer = BlockSynchronizer::new(
+        block_synchronizer_config,
+        Arc::new(Chainspec::random(&mut rng)),
+        MAX_SIMULTANEOUS_PEERS as u32,
+        validator_matrix,
+        &prometheus::Registry::new(),
+    )
+    .expect("Failed to create BlockSynchronizer");
 
     // Register block for fwd sync
     assert!(block_synchronizer.register_block_by_hash(*block.hash(), false, true));
@@ -634,8 +643,22 @@ async fn fwd_sync_is_not_blocked_by_failed_header_fetch_within_latch_interval() 
         generated_effects.extend(effects);
     }
 
-    // If the effects are empty at this point, then the synchronizer gets stuck
-    assert!(!generated_effects.is_empty());
+    assert_matches!(
+        block_synchronizer.forward_progress(),
+        BlockSynchronizerProgress::Syncing(block_hash, _, _) if block_hash == *block.hash()
+    );
+
+    // The effects are empty at this point and the synchronizer is stuck
+    assert!(generated_effects.is_empty());
+
+    // Wait for the stall detection time to pass
+    tokio::time::sleep(Duration::from_secs(16)).await;
+
+    // Check if the forward builder is reported as stalled so that the control logic can recover
+    assert_matches!(
+        block_synchronizer.forward_progress(),
+        BlockSynchronizerProgress::Stalled(block_hash, _, _) if block_hash == *block.hash()
+    );
 }
 
 #[tokio::test]
@@ -836,10 +859,8 @@ async fn registering_signatures_for_weak_finality_triggers_fetch_for_block_body(
     }
 }
 
-//TODO: remove this ignore when the synchronizer can recover from the stall
-#[ignore]
 #[tokio::test]
-async fn fwd_sync_is_not_blocked_by_failed_signatures_fetch_within_latch_interval() {
+async fn fwd_sync_is_reported_stalled_if_failed_signatures_fetches_arrive_within_latch_interval() {
     let mut rng = TestRng::new();
     let mock_reactor = MockReactor::new();
     let test_env: TestEnv = rng.gen();
@@ -847,7 +868,16 @@ async fn fwd_sync_is_not_blocked_by_failed_signatures_fetch_within_latch_interva
     let block = test_env.block();
     let validator_matrix = test_env.gen_validator_matrix();
     let num_validators = test_env.validator_keys().len();
-    let mut block_synchronizer = BlockSynchronizer::new_initialized(&mut rng, validator_matrix);
+    let mut block_synchronizer_config = Config::default();
+    block_synchronizer_config.progress_stall_threshold_interval = TimeDiff::from_seconds(15);
+    let mut block_synchronizer = BlockSynchronizer::new(
+        block_synchronizer_config,
+        Arc::new(Chainspec::random(&mut rng)),
+        MAX_SIMULTANEOUS_PEERS as u32,
+        validator_matrix,
+        &prometheus::Registry::new(),
+    )
+    .expect("Failed to create BlockSynchronizer");
 
     // Register block for fwd sync
     assert!(block_synchronizer.register_block_by_hash(*block.hash(), false, true));
@@ -918,8 +948,22 @@ async fn fwd_sync_is_not_blocked_by_failed_signatures_fetch_within_latch_interva
         generated_effects.extend(effects);
     }
 
-    // If the effects are empty at this point, then the synchronizer gets stuck
-    assert!(!generated_effects.is_empty());
+    assert_matches!(
+        block_synchronizer.forward_progress(),
+        BlockSynchronizerProgress::Syncing(block_hash, _, _) if block_hash == *block.hash()
+    );
+
+    // The effects are empty at this point and the synchronizer is stuck
+    assert!(generated_effects.is_empty());
+
+    // Wait for the stall detection time to pass
+    tokio::time::sleep(Duration::from_secs(16)).await;
+
+    // Check if the forward builder is reported as stalled so that the control logic can recover
+    assert_matches!(
+        block_synchronizer.forward_progress(),
+        BlockSynchronizerProgress::Stalled(block_hash, _, _) if block_hash == *block.hash()
+    );
 }
 
 #[tokio::test]
