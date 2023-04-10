@@ -247,7 +247,12 @@ impl BlockSynchronizer {
 async fn global_state_sync_wont_stall_with_bad_peers() {
     let mut rng = TestRng::new();
     let mock_reactor = MockReactor::new();
-    let test_env: TestEnv = rng.gen();
+    let test_env = rng.gen::<TestEnv>().with_block(
+        TestBlockBuilder::new()
+            .era(1)
+            .deploys([Deploy::random(&mut rng)].iter())
+            .build(&mut rng),
+    );
     let peers = test_env.peers();
     let block = test_env.block();
     let validator_matrix = test_env.gen_validator_matrix();
@@ -270,24 +275,36 @@ async fn global_state_sync_wont_stall_with_bad_peers() {
     );
     historical_builder.register_era_validator_weights(&block_synchronizer.validator_matrix);
 
-    // Register finality signatures
-    register_multiple_signatures(historical_builder, block, validators_private_keys.iter());
-
+    // Register finality signatures to reach weak finality
+    register_multiple_signatures(
+        historical_builder,
+        block,
+        validators_private_keys
+            .iter()
+            .take(validators_private_keys.len() / 3 + 1),
+    );
     assert!(
         historical_builder.register_block(block, None).is_ok(),
         "should register block"
     );
+    // Register the remaining signatures to reach strict finality
+    register_multiple_signatures(
+        historical_builder,
+        block,
+        validators_private_keys
+            .iter()
+            .skip(validators_private_keys.len() / 3 + 1),
+    );
 
     // At this point, the next step the synchronizer takes should be to get global state
-    let mut effects = block_synchronizer.need_next(mock_reactor.effect_builder(), &mut rng);
+    let effects = block_synchronizer.need_next(mock_reactor.effect_builder(), &mut rng);
     assert_eq!(
         effects.len(),
         1,
         "need next should have 1 effect at this step, not {}",
         effects.len()
     );
-    tokio::spawn(async move { effects.remove(0).await });
-    let event = mock_reactor.crank().await;
+    let event = mock_reactor.process_effects(effects).await.remove(0);
 
     // Expect a `SyncGlobalStateRequest` for the `GlobalStateSynchronizer`
     // The peer list that the GlobalStateSynchronizer will use to fetch the tries
@@ -1283,7 +1300,7 @@ async fn registering_approvals_hashes_triggers_fetch_for_deploys() {
 }
 
 #[tokio::test]
-async fn have_block_with_strict_finality_requires_block_enqueue_for_execution() {
+async fn fwd_have_block_body_without_deploys_and_strict_finality_transitions_state_machine() {
     let mut rng = TestRng::new();
     let mock_reactor = MockReactor::new();
     let test_env: TestEnv = rng.gen();
@@ -1306,8 +1323,97 @@ async fn have_block_with_strict_finality_requires_block_enqueue_for_execution() 
         .register_block_header(block.clone().take_header(), None)
         .is_ok());
     fwd_builder.register_era_validator_weights(&block_synchronizer.validator_matrix);
+
+    // Register finality signatures to reach strict finality
     register_multiple_signatures(fwd_builder, block, validators_private_keys.iter());
+
     assert!(fwd_builder.register_block(block, None).is_ok());
+
+    // Check the block acquisition state
+    assert_matches!(
+        fwd_builder.block_acquisition_state(),
+        BlockAcquisitionState::HaveBlock(acquired_block, _, _) if acquired_block.hash() == block.hash()
+    );
+
+    // Since the block doesn't have any deploys and already has achieved strict finality, we expect
+    // it to transition directly to HaveStrictFinality and ask for the next piece of work
+    // immediately
+    let mut effects = block_synchronizer.need_next(mock_reactor.effect_builder(), &mut rng);
+    assert_eq!(effects.len(), 1);
+
+    let fwd_builder = block_synchronizer
+        .forward
+        .as_ref()
+        .expect("Forward builder should have been initialized");
+    assert_matches!(
+        fwd_builder.block_acquisition_state(),
+        BlockAcquisitionState::HaveStrictFinalitySignatures(acquired_block, ..) if acquired_block.hash() == block.hash()
+    );
+
+    // Expect a single NeedNext event
+    let events = effects.remove(0).await;
+    assert_eq!(events.len(), 1);
+    assert_matches!(
+        events[0],
+        Event::Request(BlockSynchronizerRequest::NeedNext)
+    );
+}
+
+#[tokio::test]
+async fn have_block_with_strict_finality_requires_creation_of_finalized_block() {
+    let mut rng = TestRng::new();
+    let mock_reactor = MockReactor::new();
+    let test_env: TestEnv = rng.gen();
+    let peers = test_env.peers();
+    let block = test_env.block();
+    let validator_matrix = test_env.gen_validator_matrix();
+    let validators_private_keys = test_env.validator_keys();
+    let mut block_synchronizer = BlockSynchronizer::new_initialized(&mut rng, validator_matrix);
+
+    // Register block for fwd sync
+    assert!(block_synchronizer.register_block_by_hash(*block.hash(), false, true));
+    assert!(block_synchronizer.forward.is_some());
+    block_synchronizer.register_peers(*block.hash(), peers.clone());
+
+    let fwd_builder = block_synchronizer
+        .forward
+        .as_mut()
+        .expect("Forward builder should have been initialized");
+    assert!(fwd_builder
+        .register_block_header(block.clone().take_header(), None)
+        .is_ok());
+    fwd_builder.register_era_validator_weights(&block_synchronizer.validator_matrix);
+
+    // Register signatures for weak finality
+    register_multiple_signatures(
+        fwd_builder,
+        block,
+        validators_private_keys
+            .iter()
+            .take(validators_private_keys.len() / 3 + 1),
+    );
+    assert!(fwd_builder.register_block(block, None).is_ok());
+
+    // Check the block acquisition state
+    assert_matches!(
+        fwd_builder.block_acquisition_state(),
+        BlockAcquisitionState::HaveBlock(acquired_block, _, _) if acquired_block.hash() == block.hash()
+    );
+
+    // Register the remaining signatures to reach strict finality
+    register_multiple_signatures(
+        fwd_builder,
+        block,
+        validators_private_keys
+            .iter()
+            .skip(validators_private_keys.len() / 3 + 1),
+    );
+
+    // Check the block acquisition state
+    assert_matches!(
+        fwd_builder.block_acquisition_state(),
+        BlockAcquisitionState::HaveStrictFinalitySignatures(acquired_block, ..) if acquired_block.hash() == block.hash()
+    );
 
     // Block should have strict finality and will require to be executed
     let events = need_next(&mut rng, &mock_reactor, &mut block_synchronizer, 1).await;
@@ -1324,7 +1430,7 @@ async fn have_block_with_strict_finality_requires_block_enqueue_for_execution() 
 }
 
 #[tokio::test]
-async fn have_block_with_strict_finality_handles_created_finalized_block() {
+async fn fwd_have_strict_finality_requests_enqueue_when_finalized_block_is_created() {
     let mut rng = TestRng::new();
     let mock_reactor = MockReactor::new();
     let test_env: TestEnv = rng.gen();
@@ -1348,11 +1454,37 @@ async fn have_block_with_strict_finality_handles_created_finalized_block() {
         .is_ok());
     fwd_builder.register_era_validator_weights(&block_synchronizer.validator_matrix);
 
-    // Register finality signatures
-    register_multiple_signatures(fwd_builder, block, validators_private_keys.iter());
-
+    // Register finality signatures to reach weak finality
+    register_multiple_signatures(
+        fwd_builder,
+        block,
+        validators_private_keys
+            .iter()
+            .take(validators_private_keys.len() / 3 + 1),
+    );
     assert!(fwd_builder.register_block(block, None).is_ok());
+    // Register the remaining signatures to reach strict finality
+    register_multiple_signatures(
+        fwd_builder,
+        block,
+        validators_private_keys
+            .iter()
+            .skip(validators_private_keys.len() / 3 + 1),
+    );
 
+    // Check the block acquisition state
+    assert_matches!(
+        fwd_builder.block_acquisition_state(),
+        BlockAcquisitionState::HaveStrictFinalitySignatures(acquired_block, ..) if acquired_block.hash() == block.hash()
+    );
+
+    assert_matches!(
+        block_synchronizer.forward_progress(),
+        BlockSynchronizerProgress::Syncing(block_hash, _, _) if block_hash == *block.hash()
+    );
+
+    // After the FinalizedBlock is created, the block synchronizer will request for it to be
+    // enqueued for execution
     let event = Event::MadeFinalizedBlock {
         block_hash: *block.hash(),
         result: Some((block.clone().into(), Vec::new())),
@@ -1361,17 +1493,33 @@ async fn have_block_with_strict_finality_handles_created_finalized_block() {
     assert_eq!(effects.len(), 1);
     let events = mock_reactor.process_effects(effects).await;
 
+    // Check the block acquisition state
+    let fwd_builder = block_synchronizer
+        .forward
+        .as_ref()
+        .expect("Forward builder should have been initialized");
+    assert_matches!(
+        fwd_builder.block_acquisition_state(),
+        BlockAcquisitionState::HaveFinalizedBlock(block_hash, _, _) if block_hash == block.hash()
+    );
+
     assert_matches!(
         &events[0],
         MockReactorEvent::ContractRuntimeRequest(ContractRuntimeRequest::EnqueueBlockForExecution {
             finalized_block,
             ..
         }) if finalized_block.height() == block.height()
+    );
+
+    // Progress is syncing until we get a confirmation that the block was enqueued for execution
+    assert_matches!(
+        block_synchronizer.forward_progress(),
+        BlockSynchronizerProgress::Syncing(block_hash, _, _) if block_hash == *block.hash()
     );
 }
 
 #[tokio::test]
-async fn fwd_sync_is_finished_when_block_is_marked_complete() {
+async fn fwd_builder_status_is_executing_when_block_is_enqueued_for_execution() {
     let mut rng = TestRng::new();
     let mock_reactor = MockReactor::new();
     let test_env: TestEnv = rng.gen();
@@ -1395,55 +1543,116 @@ async fn fwd_sync_is_finished_when_block_is_marked_complete() {
         .is_ok());
     fwd_builder.register_era_validator_weights(&block_synchronizer.validator_matrix);
 
-    // Register finality signatures
-    register_multiple_signatures(fwd_builder, block, validators_private_keys.iter());
-
+    // Register finality signatures to reach weak finality
+    register_multiple_signatures(
+        fwd_builder,
+        block,
+        validators_private_keys
+            .iter()
+            .take(validators_private_keys.len() / 3 + 1),
+    );
     assert!(fwd_builder.register_block(block, None).is_ok());
-
-    let event = Event::MadeFinalizedBlock {
-        block_hash: *block.hash(),
-        result: Some((block.clone().into(), Vec::new())),
-    };
-    let effects = block_synchronizer.handle_event(mock_reactor.effect_builder(), &mut rng, event);
-    assert_eq!(effects.len(), 1);
-    let events = mock_reactor.process_effects(effects).await;
-
-    assert_matches!(
-        &events[0],
-        MockReactorEvent::ContractRuntimeRequest(ContractRuntimeRequest::EnqueueBlockForExecution {
-            finalized_block,
-            ..
-        }) if finalized_block.height() == block.height()
+    // Register the remaining signatures to reach strict finality
+    register_multiple_signatures(
+        fwd_builder,
+        block,
+        validators_private_keys
+            .iter()
+            .skip(validators_private_keys.len() / 3 + 1),
     );
-
-    let effects = block_synchronizer.handle_event(
-        mock_reactor.effect_builder(),
-        &mut rng,
-        Event::MarkBlockExecutionEnqueued(*block.hash()),
-    );
-    assert_eq!(effects.len(), 0);
-
-    assert_matches!(
-        block_synchronizer.forward_progress(),
-        BlockSynchronizerProgress::Executing(block_hash, _, era_id) if block_hash == *block.hash() && era_id == block.header().era_id()
-    );
-
-    let effects = block_synchronizer.handle_event(
-        mock_reactor.effect_builder(),
-        &mut rng,
-        Event::MarkBlockExecuted(*block.hash()),
-    );
-    assert_eq!(effects.len(), 0);
 
     // Check the block acquisition state
     assert_matches!(
-        block_synchronizer.forward_builder().block_acquisition_state(),
-        BlockAcquisitionState::HaveStrictFinalitySignatures(acquired_block, _) if acquired_block.hash() == block.hash()
+        fwd_builder.block_acquisition_state(),
+        BlockAcquisitionState::HaveStrictFinalitySignatures(acquired_block, ..) if acquired_block.hash() == block.hash()
     );
 
+    // Register finalized block
+    fwd_builder.register_made_finalized_block(block.clone().into(), Vec::new());
+    assert_matches!(
+        fwd_builder.block_acquisition_state(),
+        BlockAcquisitionState::HaveFinalizedBlock(block_hash, _, _) if block_hash == block.hash()
+    );
+
+    // Simulate that enqueuing the block for execution was successful
+    let event = Event::MarkBlockExecutionEnqueued(*block.hash());
+
+    // There is nothing for the synchronizer to do at this point.
+    // It will wait for the block to be executed
+    let effects = block_synchronizer.handle_event(mock_reactor.effect_builder(), &mut rng, event);
+    assert_eq!(effects.len(), 0);
+
+    // Progress should now indicate that the block is executing
     assert_matches!(
         block_synchronizer.forward_progress(),
-        BlockSynchronizerProgress::Synced(block_hash, _, era_id) if block_hash == *block.hash() && era_id == block.header().era_id()
+        BlockSynchronizerProgress::Executing(block_hash, _, _) if block_hash == *block.hash()
+    );
+}
+
+#[tokio::test]
+async fn fwd_sync_is_finished_when_block_is_marked_as_executed() {
+    let mut rng = TestRng::new();
+    let mock_reactor = MockReactor::new();
+    let test_env: TestEnv = rng.gen();
+    let peers = test_env.peers();
+    let block = test_env.block();
+    let validator_matrix = test_env.gen_validator_matrix();
+    let validators_private_keys = test_env.validator_keys();
+    let mut block_synchronizer = BlockSynchronizer::new_initialized(&mut rng, validator_matrix);
+
+    // Register block for fwd sync
+    assert!(block_synchronizer.register_block_by_hash(*block.hash(), false, true));
+    assert!(block_synchronizer.forward.is_some());
+    block_synchronizer.register_peers(*block.hash(), peers.clone());
+
+    let fwd_builder = block_synchronizer
+        .forward
+        .as_mut()
+        .expect("Forward builder should have been initialized");
+    assert!(fwd_builder
+        .register_block_header(block.clone().take_header(), None)
+        .is_ok());
+    fwd_builder.register_era_validator_weights(&block_synchronizer.validator_matrix);
+
+    // Register finality signatures to reach weak finality
+    register_multiple_signatures(
+        fwd_builder,
+        block,
+        validators_private_keys
+            .iter()
+            .take(validators_private_keys.len() / 3 + 1),
+    );
+    assert!(fwd_builder.register_block(block, None).is_ok());
+    // Register the remaining signatures to reach strict finality
+    register_multiple_signatures(
+        fwd_builder,
+        block,
+        validators_private_keys
+            .iter()
+            .skip(validators_private_keys.len() / 3 + 1),
+    );
+
+    // Register finalized block
+    fwd_builder.register_made_finalized_block(block.clone().into(), Vec::new());
+    fwd_builder.register_block_execution_enqueued();
+
+    // Progress should now indicate that the block is executing
+    assert_matches!(
+        block_synchronizer.forward_progress(),
+        BlockSynchronizerProgress::Executing(block_hash, _, _) if block_hash == *block.hash()
+    );
+
+    // Simulate a MarkBlockExecuted event
+    let event = Event::MarkBlockExecuted(*block.hash());
+
+    // There is nothing for the synchronizer to do at this point, the sync is finished.
+    let effects = block_synchronizer.handle_event(mock_reactor.effect_builder(), &mut rng, event);
+    assert_eq!(effects.len(), 0);
+
+    // Progress should now indicate that the block is executing
+    assert_matches!(
+        block_synchronizer.forward_progress(),
+        BlockSynchronizerProgress::Synced(block_hash, _, _) if block_hash == *block.hash()
     );
 }
 
@@ -1509,8 +1718,23 @@ async fn synchronizer_halts_if_block_cannot_be_made_executable() {
         .register_block_header(block.clone().take_header(), None)
         .is_ok());
     fwd_builder.register_era_validator_weights(&block_synchronizer.validator_matrix);
-    register_multiple_signatures(fwd_builder, block, validators_private_keys.iter());
+    // Register finality signatures to reach weak finality
+    register_multiple_signatures(
+        fwd_builder,
+        block,
+        validators_private_keys
+            .iter()
+            .take(validators_private_keys.len() / 3 + 1),
+    );
     assert!(fwd_builder.register_block(block, None).is_ok());
+    // Register the remaining signatures to reach strict finality
+    register_multiple_signatures(
+        fwd_builder,
+        block,
+        validators_private_keys
+            .iter()
+            .skip(validators_private_keys.len() / 3 + 1),
+    );
 
     // Block should have strict finality and will require to be executed
     let events = need_next(&mut rng, &mock_reactor, &mut block_synchronizer, 1).await;
@@ -1529,7 +1753,6 @@ async fn synchronizer_halts_if_block_cannot_be_made_executable() {
     // This can happen if the synchronizer didn't fetch the right approvals hashes.
     // Don't expect to progress any further here. The control logic should
     // leap and backfill this block during a historical sync.
-    // TODO: should we maybe abort this builder in this case?
     let effects = block_synchronizer.handle_event(
         mock_reactor.effect_builder(),
         &mut rng,
@@ -1539,4 +1762,20 @@ async fn synchronizer_halts_if_block_cannot_be_made_executable() {
         },
     );
     assert_eq!(effects.len(), 0);
+
+    // Check the block acquisition state
+    let fwd_builder = block_synchronizer
+        .forward
+        .as_ref()
+        .expect("Forward builder should have been initialized");
+    assert_matches!(
+        fwd_builder.block_acquisition_state(),
+        BlockAcquisitionState::Failed(block_hash, _) if block_hash == block.hash()
+    );
+
+    // Progress should now indicate that the block is executing
+    assert_matches!(
+        block_synchronizer.forward_progress(),
+        BlockSynchronizerProgress::Syncing(block_hash, _, _) if block_hash == *block.hash()
+    );
 }
