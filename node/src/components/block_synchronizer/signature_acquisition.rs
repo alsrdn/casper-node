@@ -5,7 +5,9 @@ use datasize::DataSize;
 use casper_types::PublicKey;
 
 use super::block_acquisition::Acceptance;
-use crate::types::{EraValidatorWeights, FinalitySignature, SignatureWeight};
+use crate::types::{
+    chainspec::LegacyRequiredFinality, EraValidatorWeights, FinalitySignature, SignatureWeight,
+};
 
 #[derive(Clone, PartialEq, Eq, DataSize, Debug)]
 enum SignatureState {
@@ -19,10 +21,14 @@ pub(super) struct SignatureAcquisition {
     inner: BTreeMap<PublicKey, SignatureState>,
     maybe_is_checkable: Option<bool>,
     signature_weight: SignatureWeight,
+    legacy_required_finality: LegacyRequiredFinality,
 }
 
 impl SignatureAcquisition {
-    pub(super) fn new(validators: Vec<PublicKey>) -> Self {
+    pub(super) fn new(
+        validators: Vec<PublicKey>,
+        legacy_required_finality: LegacyRequiredFinality,
+    ) -> Self {
         let inner = validators
             .into_iter()
             .map(|validator| (validator, SignatureState::Vacant))
@@ -32,6 +38,7 @@ impl SignatureAcquisition {
             inner,
             maybe_is_checkable,
             signature_weight: SignatureWeight::Insufficient,
+            legacy_required_finality,
         }
     }
 
@@ -107,5 +114,33 @@ impl SignatureAcquisition {
 
     pub(super) fn signature_weight(&self) -> SignatureWeight {
         self.signature_weight
+    }
+
+    // Determines signature weight sufficiency based on the type of sync (forward or historical) and
+    // the protocol version that the block was created with (pre-1.5 or post-1.5)
+    // `requires_strict_finality` determines what the caller requires with regards to signature
+    // sufficiency:
+    //      * false means that the caller considers `Weak` finality as sufficient
+    //      * true means that the caller considers `Strict` finality as sufficient
+    pub(super) fn has_sufficient_finality(
+        &self,
+        is_historical: bool,
+        requires_strict_finality: bool,
+    ) -> bool {
+        if is_historical && !self.is_checkable() {
+            match self.legacy_required_finality {
+                LegacyRequiredFinality::Strict => self
+                    .signature_weight
+                    .is_sufficient(requires_strict_finality),
+                LegacyRequiredFinality::Weak => {
+                    self.signature_weight == SignatureWeight::Strict
+                        || self.signature_weight == SignatureWeight::Weak
+                }
+                LegacyRequiredFinality::Any => true,
+            }
+        } else {
+            self.signature_weight
+                .is_sufficient(requires_strict_finality)
+        }
     }
 }
