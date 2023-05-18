@@ -281,6 +281,7 @@ impl BlockSynchronizer {
         &mut self,
         block_hash: BlockHash,
         should_fetch_execution_state: bool,
+        wait_for_validator_matrix_update: bool,
     ) -> bool {
         if let (true, Some(builder), _) | (false, _, Some(builder)) = (
             should_fetch_execution_state,
@@ -301,6 +302,7 @@ impl BlockSynchronizer {
             self.chainspec
                 .core_config
                 .start_protocol_version_with_strict_finality_signatures_required,
+            wait_for_validator_matrix_update,
         );
         if should_fetch_execution_state {
             self.historical.replace(builder);
@@ -311,12 +313,13 @@ impl BlockSynchronizer {
     }
 
     /// Registers a sync leap result, if able.
+    /// Returns true if builder was updated or created, false otherwise
     pub(crate) fn register_sync_leap(
         &mut self,
         sync_leap: &SyncLeap,
         peers: Vec<NodeId>,
         should_fetch_execution_state: bool,
-    ) {
+    ) -> bool {
         fn apply_sigs(builder: &mut BlockBuilder, maybe_sigs: Option<&BlockSignatures>) {
             if let Some(signatures) = maybe_sigs {
                 for finality_signature in signatures.finality_signatures() {
@@ -337,6 +340,7 @@ impl BlockSynchronizer {
                 debug!(%builder, "BlockSynchronizer: register_sync_leap update builder");
                 apply_sigs(builder, maybe_sigs);
                 builder.register_peers(peers);
+                true
             }
             _ => {
                 debug!("BlockSynchronizer: register_sync_leap update validator_matrix");
@@ -362,11 +366,13 @@ impl BlockSynchronizer {
                     } else {
                         self.forward = Some(builder);
                     }
+                    true
                 } else {
                     warn!(
                         block_hash = %block_header.block_hash(),
                         "BlockSynchronizer: register_sync_leap unable to create block builder",
                     );
+                    false
                 }
             }
         }
@@ -557,6 +563,7 @@ impl BlockSynchronizer {
             let action = builder.block_acquisition_action(rng, max_simultaneous_peers);
             let peers = action.peers_to_ask();
             let need_next = action.need_next();
+            let wait_for_validator_matrix_update = builder.wait_for_validator_matrix_update();
             info!(
                 "BlockSynchronizer: {} with {} peers",
                 need_next,
@@ -740,18 +747,27 @@ impl BlockSynchronizer {
                         "BlockSynchronizer: does not have era_validators for era_id: {}",
                         era_id
                     );
-                    builder.set_in_flight_latch();
-                    results.extend(peers.into_iter().flat_map(|node_id| {
-                        effect_builder
-                            .fetch::<SyncLeap>(
-                                SyncLeapIdentifier::sync_to_historical(builder.block_hash()),
-                                node_id,
-                                Box::new(SyncLeapValidationMetaData::from_chainspec(
-                                    chainspec.as_ref(),
-                                )),
-                            )
-                            .event(Event::SyncLeapFetched)
-                    }))
+                    if wait_for_validator_matrix_update {
+                        debug!("XXX Waiting for era validator update to happen from somewhere");
+                        results.extend(
+                            effect_builder
+                                .set_timeout(need_next_interval)
+                                .event(|_| Event::Request(BlockSynchronizerRequest::NeedNext)),
+                        )
+                    } else {
+                        builder.set_in_flight_latch();
+                        results.extend(peers.into_iter().flat_map(|node_id| {
+                            effect_builder
+                                .fetch::<SyncLeap>(
+                                    SyncLeapIdentifier::sync_to_historical(builder.block_hash()),
+                                    node_id,
+                                    Box::new(SyncLeapValidationMetaData::from_chainspec(
+                                        chainspec.as_ref(),
+                                    )),
+                                )
+                                .event(Event::SyncLeapFetched)
+                        }))
+                    }
                 }
                 NeedNext::SwitchToHaveStrictFinality(block_hash, _) => {
                     // Don't set the latch since this is an internal state transition
@@ -1457,6 +1473,7 @@ impl<REv: ReactorEvent> Component<REv> for BlockSynchronizer {
                                     },
                                 )
                         } else {
+                            debug!("XXX No more global states to sync through SyncGlobalStates");
                             Effects::new()
                         }
                     }

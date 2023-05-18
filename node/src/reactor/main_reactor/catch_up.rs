@@ -1,6 +1,7 @@
+use casper_execution_engine::core::engine_state::GetEraValidatorsError;
 use either::Either;
 use std::time::Duration;
-use tracing::{debug, info, warn};
+use tracing::{debug, info, warn, error};
 
 use casper_types::{TimeDiff, Timestamp};
 
@@ -12,13 +13,13 @@ use crate::{
         sync_leaper::{LeapActivityError, LeapState},
         ValidatorBoundComponent,
     },
-    effect::{requests::BlockSynchronizerRequest, EffectBuilder, EffectExt, Effects},
+    effect::{requests::BlockSynchronizerRequest, EffectBuilder, EffectExt, Effects, EffectResultExt},
     reactor::{
         main_reactor::{MainEvent, MainReactor},
         wrap_effects,
     },
-    types::{ActivationPoint, BlockHash, NodeId, SyncLeap, SyncLeapIdentifier},
-    NodeRng,
+    types::{ActivationPoint, BlockHash, NodeId, SyncLeap, SyncLeapIdentifier, GlobalStatesMetadata},
+    NodeRng, contract_runtime::EraValidatorsRequest,
 };
 
 pub(super) enum CatchUpInstruction {
@@ -39,7 +40,7 @@ impl MainReactor {
     ) -> CatchUpInstruction {
         // if there is instruction, return to start working on it
         // else fall thru with the current best available id for block syncing
-        let sync_identifier = match self.catch_up_process() {
+        let sync_identifier = match self.catch_up_process(effect_builder, rng) {
             Either::Right(catch_up_instruction) => return catch_up_instruction,
             Either::Left(sync_identifier) => sync_identifier,
         };
@@ -66,7 +67,7 @@ impl MainReactor {
         CatchUpInstruction::CaughtUp
     }
 
-    fn catch_up_process(&mut self) -> Either<SyncIdentifier, CatchUpInstruction> {
+    fn catch_up_process(&mut self, effect_builder: EffectBuilder<MainEvent>, rng: &mut NodeRng,) -> Either<SyncIdentifier, CatchUpInstruction> {
         let catch_up_progress = self.block_synchronizer.historical_progress();
         self.update_last_progress(&catch_up_progress, false);
         match catch_up_progress {
@@ -79,7 +80,7 @@ impl MainReactor {
             }
             BlockSynchronizerProgress::Syncing(block_hash, maybe_block_height, last_progress) => {
                 // working on syncing a block
-                self.catch_up_syncing(block_hash, maybe_block_height, last_progress)
+                self.catch_up_syncing(block_hash, maybe_block_height, last_progress, effect_builder, rng)
             }
             BlockSynchronizerProgress::Executing(block_hash, _, _) => {
                 // this code path should be unreachable because we're not
@@ -120,26 +121,29 @@ impl MainReactor {
                 // if too much time has passed, the node will shutdown and require a
                 // trusted block hash to be provided via the config file
                 info!("CatchUp: local tip detected, no trusted hash");
-                if block.header().is_switch_block() {
-                    self.switch_block_header = Some(block.header().clone());
-                }
                 Either::Left(SyncIdentifier::LocalTip(
                     *block.hash(),
                     block.height(),
                     block.header().era_id(),
                 ))
             }
-            Ok(None) if self.switch_block_header.is_none() => {
-                // no trusted hash, no local block, might be genesis
-                self.catch_up_check_genesis()
-            }
             Ok(None) => {
-                // no trusted hash, no local block, no error, must be waiting for genesis
-                info!("CatchUp: waiting to store genesis immediate switch block");
-                Either::Right(CatchUpInstruction::CheckLater(
-                    "waiting for genesis immediate switch block to be stored".to_string(),
-                    self.control_logic_default_delay.into(),
-                ))
+                if self
+                    .storage
+                    .read_highest_switch_block_headers(1)
+                    .unwrap()
+                    .is_empty()
+                {
+                    // no trusted hash, no local block, might be genesis
+                    self.catch_up_check_genesis()
+                } else {
+                    // no trusted hash, no local block, no error, must be waiting for genesis
+                    info!("CatchUp: waiting to store genesis immediate switch block");
+                    Either::Right(CatchUpInstruction::CheckLater(
+                        "waiting for genesis immediate switch block to be stored".to_string(),
+                        self.control_logic_default_delay.into(),
+                    ))
+                }
             }
             Err(err) => Either::Right(CatchUpInstruction::Fatal(format!(
                 "CatchUp: fatal block store error when attempting to read \
@@ -234,6 +238,8 @@ impl MainReactor {
         block_hash: BlockHash,
         maybe_block_height: Option<u64>,
         last_progress: Timestamp,
+        effect_builder: EffectBuilder<MainEvent>,
+        rng: &mut NodeRng,
     ) -> Either<SyncIdentifier, CatchUpInstruction> {
         // if any progress has been made, reset attempts
         if last_progress > self.last_progress {
@@ -253,6 +259,23 @@ impl MainReactor {
                 "CatchUp: idleness detected"
             );
         }
+
+        match self.sync_leaper.leap_status() {
+            LeapState::Idle => {},
+            LeapState::Awaiting { .. } => {
+                return Either::Right(CatchUpInstruction::CheckLater(
+                    "sync leaper is awaiting response".to_string(),
+                    self.control_logic_default_delay.into(),
+                ))
+            },
+            LeapState::Received {
+                best_available,
+                from_peers,
+                ..
+            } => return Either::Right(self.catch_up_leap_received(effect_builder, rng, *best_available, from_peers)),
+            LeapState::Failed { .. } => {},
+        }
+
         match maybe_block_height {
             None => Either::Left(SyncIdentifier::BlockHash(block_hash)),
             Some(block_height) => {
@@ -288,7 +311,7 @@ impl MainReactor {
         // otherwise block_synchronizer detects as Idle which can cause unnecessary churn
         // on subsequent cranks while leaper is awaiting responses.
         self.block_synchronizer
-            .register_block_by_hash(block_hash, true);
+            .register_block_by_hash(block_hash, true, false);
         let leap_status = self.sync_leaper.leap_status();
         info!(%block_hash, %leap_status, "CatchUp: status");
         match leap_status {
@@ -355,6 +378,99 @@ impl MainReactor {
         CatchUpInstruction::Do(self.control_logic_default_delay.into(), effects)
     }
 
+        // Attempts to read the validators from the global states of the block after the upgrade and its
+    // parent; initiates fetching of the missing global states, if any.
+    fn catch_up_try_read_validators_for_block_after_upgrade(
+        &mut self,
+        effect_builder: EffectBuilder<MainEvent>,
+        global_states_metadata: GlobalStatesMetadata,
+    ) -> Effects<MainEvent> {
+        // We try to read the validator sets from global states of two blocks - if either returns
+        // `RootNotFound`, we'll initiate fetching of the corresponding global state.
+        let effects = async move {
+            // Send the requests to contract runtime.
+            let before_era_validators_request = EraValidatorsRequest::new(
+                global_states_metadata.before_state_hash,
+                global_states_metadata.before_protocol_version,
+            );
+            let before_era_validators_result = effect_builder
+                .get_era_validators_from_contract_runtime(before_era_validators_request)
+                .await;
+            let after_era_validators_request = EraValidatorsRequest::new(
+                global_states_metadata.after_state_hash,
+                global_states_metadata.after_protocol_version,
+            );
+            let after_era_validators_result = effect_builder
+                .get_era_validators_from_contract_runtime(after_era_validators_request)
+                .await;
+
+            // Check the results.
+            // A return value of `Ok` means that validators were read successfully.
+            // An `Err` will contain a vector of (block_hash, global_state_hash) pairs to be
+            // fetched by the `GlobalStateSynchronizer`, along with a vector of peers to ask.
+            match (before_era_validators_result, after_era_validators_result) {
+                // Both states were present - return the result.
+                (Ok(before_era_validators), Ok(after_era_validators)) => {
+                    Ok((before_era_validators, after_era_validators))
+                }
+                // Both were absent - fetch global states for both blocks.
+                (
+                    Err(GetEraValidatorsError::RootNotFound),
+                    Err(GetEraValidatorsError::RootNotFound),
+                ) => Err(vec![
+                    (
+                        global_states_metadata.before_hash,
+                        global_states_metadata.before_state_hash,
+                    ),
+                    (
+                        global_states_metadata.after_hash,
+                        global_states_metadata.after_state_hash,
+                    ),
+                ]),
+                // The after-block's global state was missing - return the hashes.
+                (Ok(_), Err(GetEraValidatorsError::RootNotFound)) => Err(vec![(
+                    global_states_metadata.after_hash,
+                    global_states_metadata.after_state_hash,
+                )]),
+                // The before-block's global state was missing - return the hashes.
+                (Err(GetEraValidatorsError::RootNotFound), Ok(_)) => Err(vec![(
+                    global_states_metadata.before_hash,
+                    global_states_metadata.before_state_hash,
+                )]),
+                // We got some error other than `RootNotFound` - just log the error and don't
+                // synchronize anything.
+                (before_result, after_result) => {
+                    error!(
+                        ?before_result,
+                        ?after_result,
+                        "couldn't read era validators from global state in block"
+                    );
+                    Err(vec![])
+                }
+            }
+        }
+        .result(
+            // We got the era validators - just emit the event that will cause them to be compared,
+            // validators matrix to be updated and reactor to be cranked.
+            move |(before_era_validators, after_era_validators)| {
+                MainEvent::GotBlockAfterUpgradeEraValidators(
+                    global_states_metadata.after_era_id,
+                    before_era_validators,
+                    after_era_validators,
+                )
+            },
+            // A global state was missing - we ask the BlockSynchronizer to fetch what is needed.
+            |global_states_to_sync| {
+                MainEvent::BlockSynchronizerRequest(BlockSynchronizerRequest::SyncGlobalStates(
+                    global_states_to_sync,
+                ))
+            },
+        );
+        // In either case, there are effects to be processed by the reactor.
+        effects
+    }
+
+
     fn catch_up_leap_received(
         &mut self,
         effect_builder: EffectBuilder<MainEvent>,
@@ -364,16 +480,13 @@ impl MainReactor {
     ) -> CatchUpInstruction {
         let block_hash = sync_leap.highest_block_hash();
         let block_height = sync_leap.highest_block_height();
+        let block_era = sync_leap.highest_block_header_and_signatures().0.era_id();
         info!(
             %sync_leap,
             %block_height,
             %block_hash,
             "CatchUp: leap received"
         );
-
-        if let Err(msg) = self.update_highest_switch_block() {
-            return CatchUpInstruction::Fatal(msg);
-        }
 
         for validator_weights in
             sync_leap.era_validator_weights(self.validator_matrix.fault_tolerance_threshold())
@@ -396,8 +509,28 @@ impl MainReactor {
                 .handle_validators(effect_builder, rng),
         ));
 
-        self.block_synchronizer
-            .register_sync_leap(&sync_leap, from_peers, true);
+        if self.validator_matrix.has_era(&block_era) {
+            self.block_synchronizer.register_sync_leap(&sync_leap, from_peers, true);
+        } else {
+            debug!(?block_era, "XXX leap received with block hash but the validator matrix was not updated with era");
+            if let Some(global_states_metadata) = sync_leap.global_states_for_sync_across_upgrade() {
+                debug!(?global_states_metadata, "XXX found global states to sync across upgrade");
+                if block_era == global_states_metadata.after_era_id {
+                    debug!(?block_era, era_after=?global_states_metadata.after_era_id, "XXX trying to read global states to get validators for era");
+                    effects.extend(self.catch_up_try_read_validators_for_block_after_upgrade(effect_builder, global_states_metadata));
+                }
+                self.block_synchronizer.purge();
+                self.block_synchronizer.register_block_by_hash(block_hash, true, true);
+
+                // Leap again since the last leap received did not have any effect
+                match self.catch_up_leaper_idle(effect_builder, rng, block_hash) {
+                    CatchUpInstruction::Do(_, leap_effects) => {
+                        effects.extend(leap_effects);
+                    },
+                    _ => {}
+                }
+            }
+        }
 
         CatchUpInstruction::Do(self.control_logic_default_delay.into(), effects)
     }
@@ -409,7 +542,7 @@ impl MainReactor {
     ) -> CatchUpInstruction {
         if self
             .block_synchronizer
-            .register_block_by_hash(block_hash, true)
+            .register_block_by_hash(block_hash, true, false)
         {
             // NeedNext will self perpetuate until nothing is needed for this block
             let mut effects = Effects::new();

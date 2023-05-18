@@ -1,5 +1,5 @@
 use std::time::Duration;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::{
     components::consensus::ChainspecConsensusExt,
@@ -35,9 +35,25 @@ impl MainReactor {
                 self.control_logic_default_delay.into(),
             );
         }
-        if self.switch_block_header.is_none() {
-            // validate status is only checked at switch blocks
-            return ValidateInstruction::NonSwitchBlock;
+
+        match self.storage.read_highest_complete_block() {
+            Ok(maybe_block) => match maybe_block {
+                Some(highest_complete_block) => {
+                    if !highest_complete_block.header().is_switch_block() {
+                        return ValidateInstruction::NonSwitchBlock;
+                    }
+                }
+                None => {
+                    return ValidateInstruction::NonSwitchBlock;
+                }
+            },
+            Err(error) => {
+                error!(
+                    "Could not read highest complete block from storage: {}",
+                    error
+                );
+                return ValidateInstruction::NonSwitchBlock;
+            }
         }
 
         if self.should_shutdown_for_upgrade() {

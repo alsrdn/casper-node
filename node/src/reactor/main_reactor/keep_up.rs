@@ -258,7 +258,7 @@ impl MainReactor {
                 debug!("KeepUp: BlockSync: {:?}", block_hash);
                 if self
                     .block_synchronizer
-                    .register_block_by_hash(block_hash, false)
+                    .register_block_by_hash(block_hash, false, false)
                 {
                     info!(%block_hash, "KeepUp: BlockSync: registered block by hash");
                     Some(KeepUpInstruction::Do(
@@ -516,9 +516,6 @@ impl MainReactor {
         // era validator weights. if there are other processes which are holding on discovery
         // of relevant newly-seen era validator weights, they should naturally progress
         // themselves via notification on the event loop.
-        if let Err(msg) = self.update_highest_switch_block() {
-            return KeepUpInstruction::Fatal(msg);
-        }
         let block_hash = sync_leap.highest_block_hash();
         let block_height = sync_leap.highest_block_height();
         info!(%sync_leap, %block_height, %block_hash, "KeepUp: historical sync_back received");
@@ -553,7 +550,7 @@ impl MainReactor {
     ) -> KeepUpInstruction {
         if self
             .block_synchronizer
-            .register_block_by_hash(parent_hash, true)
+            .register_block_by_hash(parent_hash, true, false)
         {
             // sync the parent_hash block; we get a random sampling of peers to ask.
             // it is possible that we may get a random sampling that do not have the data

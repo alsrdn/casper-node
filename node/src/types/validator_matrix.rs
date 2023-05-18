@@ -11,7 +11,7 @@ use itertools::Itertools;
 use num_rational::Ratio;
 use serde::Serialize;
 use static_assertions::const_assert;
-use tracing::info;
+use tracing::{info, debug};
 
 use casper_types::{EraId, PublicKey, SecretKey, U512};
 
@@ -198,6 +198,7 @@ impl ValidatorMatrix {
                 self.finality_threshold_fraction,
             ))
         } else {
+            debug!(weights = ?self.read_inner(), "XXX: validator weights registered");
             self.read_inner().get(&era_id).cloned()
         }
     }

@@ -148,6 +148,7 @@ impl BlockAccumulator {
         if let Some((block_height, era_id)) = sync_identifier.block_height_and_era() {
             self.register_local_tip(block_height, era_id);
         }
+        debug!(?leap_instruction, "XXX Leap instruction");
         if leap_instruction.should_leap() {
             return SyncInstruction::Leap { block_hash };
         }
@@ -290,16 +291,24 @@ impl BlockAccumulator {
         };
 
         match acceptor.register_block(meta_block, sender) {
-            Ok(_) => match self.validator_matrix.validator_weights(era_id) {
-                Some(evw) => {
-                    let (should_store, faulty_senders) = acceptor.should_store_block(&evw);
-                    self.store_block_and_finality_signatures(
-                        effect_builder,
-                        should_store,
-                        faulty_senders,
-                    )
+            Ok(_) => {
+                debug!("XXX: acceptor.register_block returned OK");
+                match self.validator_matrix.validator_weights(era_id) {
+                    Some(evw) => {
+                        debug!(?evw, ?era_id, "XXX: validator weights were found");
+                        let (should_store, faulty_senders) = acceptor.should_store_block(&evw);
+                        debug!(?should_store, "XXX: should store is");
+                        self.store_block_and_finality_signatures(
+                            effect_builder,
+                            should_store,
+                            faulty_senders,
+                        )
+                    }
+                    None => {
+                        debug!(?era_id, "XXX: validator weights NOT found");
+                        Effects::new()
+                    },
                 }
-                None => Effects::new(),
             },
             Err(error) => match error {
                 Error::InvalidGossip(ref gossip_error) => {

@@ -77,6 +77,7 @@ pub(super) struct BlockBuilder {
     should_fetch_execution_state: bool,
     strict_finality_protocol_version: ProtocolVersion,
     peer_list: PeerList,
+    wait_for_validator_matrix_update: bool,
 
     // progress tracking
     sync_start: Instant,
@@ -112,6 +113,7 @@ impl BlockBuilder {
         latch_reset_interval: TimeDiff,
         legacy_required_finality: LegacyRequiredFinality,
         strict_finality_protocol_version: ProtocolVersion,
+        wait_for_validator_matrix_update: bool,
     ) -> Self {
         BlockBuilder {
             block_hash,
@@ -129,6 +131,7 @@ impl BlockBuilder {
             last_progress: Timestamp::now(),
             in_flight_latch: None,
             latch_reset_interval,
+            wait_for_validator_matrix_update,
         }
     }
 
@@ -177,6 +180,7 @@ impl BlockBuilder {
             last_progress: Timestamp::now(),
             in_flight_latch: None,
             latch_reset_interval,
+            wait_for_validator_matrix_update: false,
         }
     }
 
@@ -198,6 +202,10 @@ impl BlockBuilder {
 
     pub(super) fn block_hash(&self) -> BlockHash {
         self.block_hash
+    }
+
+    pub(super) fn wait_for_validator_matrix_update(&self) -> bool {
+        self.wait_for_validator_matrix_update
     }
 
     pub(super) fn maybe_block(&self) -> Option<Box<Block>> {

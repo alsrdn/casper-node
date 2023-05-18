@@ -23,7 +23,7 @@ use crate::{
     utils::{self, BlockSignatureError},
 };
 
-use super::sync_leap_validation_metadata::SyncLeapValidationMetaData;
+use super::{sync_leap_validation_metadata::SyncLeapValidationMetaData, Chainspec, chainspec::ProtocolConfig};
 
 #[derive(Error, Debug)]
 pub(crate) enum SyncLeapValidationError {
