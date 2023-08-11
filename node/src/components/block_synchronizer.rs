@@ -30,8 +30,8 @@ use tracing::{debug, error, info, trace, warn};
 
 use casper_execution_engine::engine_state;
 use casper_types::{
-    Block, BlockHash, BlockHeader, BlockSignatures, BlockV2, Chainspec, Deploy, Digest,
-    FinalitySignature, FinalitySignatureId, Timestamp,
+    Block, BlockHash, BlockHeader, BlockSignatures, Chainspec, Deploy, Digest, FinalitySignature,
+    FinalitySignatureId, Timestamp,
 };
 
 use super::network::blocklist::BlocklistJustification;
@@ -478,21 +478,12 @@ impl BlockSynchronizer {
                             .then(move |maybe_execution_results| async move {
                                 match maybe_execution_results {
                                     Some(execution_results) => {
-                                        // TODO[RC] .try_into(), becasue we want to avoid polluting
-                                        // `MetaBlock` with `NewBlock`, but maybe we'd have to
-                                        match <Block as std::convert::TryInto<BlockV2>>::try_into(
-                                            *block,
-                                        ) {
-                                            Ok(block) => {
-                                                let meta_block = MetaBlock::new(
-                                                    Arc::new(block),
-                                                    execution_results,
-                                                    MetaBlockState::new_after_historical_sync(),
-                                                );
-                                                effect_builder.announce_meta_block(meta_block).await
-                                            }
-                                            Err(_) => todo!(),
-                                        }
+                                        let meta_block = MetaBlock::new_historical(
+                                            Arc::new(*block),
+                                            execution_results,
+                                            MetaBlockState::new_after_historical_sync(),
+                                        );
+                                        effect_builder.announce_meta_block(meta_block).await;
                                     }
                                     None => {
                                         error!(

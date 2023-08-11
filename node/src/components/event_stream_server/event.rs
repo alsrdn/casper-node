@@ -6,14 +6,14 @@ use std::{
 use itertools::Itertools;
 
 use casper_types::{
-    BlockHash, BlockV2, Deploy, DeployHash, DeployHeader, EraId, ExecutionEffect, ExecutionResult,
+    Block, BlockHash, Deploy, DeployHash, DeployHeader, EraId, ExecutionEffect, ExecutionResult,
     FinalitySignature, PublicKey, Timestamp,
 };
 
 #[derive(Debug)]
 pub enum Event {
     Initialize,
-    BlockAdded(Arc<BlockV2>),
+    BlockAdded(Arc<Block>),
     DeployAccepted(Arc<Deploy>),
     DeployProcessed {
         deploy_hash: DeployHash,
