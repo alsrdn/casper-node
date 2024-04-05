@@ -24,8 +24,7 @@ use crate::{
     bytesrepr::{FromBytes, ToBytes},
     checksummed_hex,
     key::FromStrError,
-    system::auction::Error,
-    BlockTime, Key, KeyTag, Timestamp, URefAddr, BLOCKTIME_SERIALIZED_LENGTH, UREF_ADDR_LENGTH,
+    BlockTime, Key, Timestamp, URefAddr, BLOCKTIME_SERIALIZED_LENGTH, UREF_ADDR_LENGTH,
 };
 
 const GAS_TAG: u8 = 0;
@@ -60,15 +59,6 @@ impl BalanceHoldAddrTag {
             return Some(BalanceHoldAddrTag::Processing);
         }
         None
-    }
-
-    /// Returns key prefix for a purse by balance hold addr tag.
-    pub fn purse_prefix_by_tag(&self, purse_addr: URefAddr) -> Result<Vec<u8>, bytesrepr::Error> {
-        let mut ret = Vec::with_capacity(purse_addr.serialized_length() + 2);
-        ret.push(KeyTag::BalanceHold as u8);
-        ret.push(*self as u8);
-        purse_addr.write_bytes(&mut ret)?;
-        Ok(ret)
     }
 }
 
@@ -174,21 +164,18 @@ impl BalanceHoldAddr {
         }
     }
 
-    // /// Returns the common prefix of all holds on the cited purse.
-    // pub fn balance_hold_prefix(&self) -> Result<Vec<u8>, Error> {
-    //     let purse_addr_bytes = self.purse_addr().to_bytes()?;
-    //     let size = 1 + purse_addr_bytes.len();
-    //     let mut ret = Vec::with_capacity(size);
-    //     ret.push(KeyTag::BalanceHold as u8);
-    //     match self {
-    //         BalanceHoldAddr::Gas { .. } => {
-    //             ret.extend(GAS_TAG);
-    //         }
-    //         BalanceHoldAddr::Processing { .. } => ret.extend(PROCESSING_TAG),
-    //     }
-    //     ret.extend(purse_addr_bytes);
-    //     Ok(ret)
-    // }
+    /// Returns the common prefix of all holds on the cited purse.
+    pub fn balance_hold_addr_prefix_for_purse(
+        tag: BalanceHoldAddrTag,
+        purse_addr: URefAddr,
+    ) -> Result<Vec<u8>, bytesrepr::Error> {
+        let mut ret = Vec::with_capacity(
+            BalanceHoldAddrTag::BALANCE_HOLD_ADDR_TAG_LENGTH + purse_addr.serialized_length(),
+        );
+        ret.push(tag as u8);
+        purse_addr.write_bytes(&mut ret)?;
+        Ok(ret)
+    }
 
     /// To formatted string.
     pub fn to_formatted_string(&self) -> String {

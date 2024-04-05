@@ -1,8 +1,9 @@
 use crate::{data_access_layer::BalanceIdentifier, tracking_copy::TrackingCopyError};
-use casper_types::system::mint::BalanceHoldAddr;
 use casper_types::{
-    account::AccountHash, execution::Effects, system::mint::BalanceHoldAddrTag, BlockTime, Digest,
-    HoldsEpoch, ProtocolVersion, U512,
+    account::AccountHash,
+    execution::Effects,
+    system::mint::{BalanceHoldAddr, BalanceHoldAddrTag},
+    BlockTime, Digest, HoldsEpoch, ProtocolVersion, U512,
 };
 use std::fmt::{Display, Formatter};
 use thiserror::Error;

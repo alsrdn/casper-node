@@ -1209,6 +1209,11 @@ impl Key {
         }
         ret
     }
+
+    /// Returns the serialized `Key` prefix for the specified tag.
+    pub fn serialized_key_prefix_by_tag(tag: KeyTag) -> Result<Vec<u8>, Error> {
+        tag.to_bytes()
+    }
 }
 
 impl Display for Key {

@@ -4,7 +4,6 @@ use itertools::Itertools;
 use tracing::{debug, error, info, trace, warn};
 
 use casper_execution_engine::engine_state::{ExecutionEngineV1, WasmV1Request, WasmV1Result};
-use casper_storage::data_access_layer::QueryRequest;
 use casper_storage::{
     block_store::types::ApprovalsHashes,
     data_access_layer::{
@@ -12,8 +11,8 @@ use casper_storage::{
         BalanceIdentifier, BalanceRequest, BiddingRequest, BlockRewardsRequest, BlockRewardsResult,
         DataAccessLayer, EraValidatorsRequest, EraValidatorsResult, EvictItem, FeeRequest,
         FeeResult, FlushRequest, HandleFeeMode, HandleFeeRequest, HandleRefundMode,
-        HandleRefundRequest, InsufficientBalanceHandling, PruneRequest, PruneResult, StepRequest,
-        StepResult, TransferRequest,
+        HandleRefundRequest, InsufficientBalanceHandling, PruneRequest, PruneResult, QueryRequest,
+        StepRequest, StepResult, TransferRequest,
     },
     global_state::state::{
         lmdb::LmdbGlobalState, scratch::ScratchGlobalState, CommitProvider, ScratchProvider,
@@ -22,7 +21,6 @@ use casper_storage::{
     system::runtime_native::Config as NativeRuntimeConfig,
 };
 
-use casper_types::system::mint::BalanceHoldAddr;
 use casper_types::{
     bytesrepr::{self, ToBytes, U32_SERIALIZED_LENGTH},
     execution::{Effects, ExecutionResult, TransformKindV2, TransformV2},
