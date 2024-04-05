@@ -1,5 +1,4 @@
 //! Types for balance queries.
-use crate::data_access_layer::BalanceHoldRequest;
 use casper_types::{
     account::AccountHash,
     global_state::TrieMerkleProof,
@@ -276,20 +275,6 @@ impl BalanceRequest {
     /// Returns the block time.
     pub fn balance_handling(&self) -> BalanceHandling {
         self.balance_handling
-    }
-}
-
-impl From<BalanceHoldRequest> for BalanceRequest {
-    fn from(request: BalanceHoldRequest) -> Self {
-        let balance_handling = BalanceHandling::Available {
-            holds_epoch: request.holds_epoch(),
-        };
-        BalanceRequest::new(
-            request.state_hash(),
-            request.protocol_version(),
-            request.identifier().clone(),
-            balance_handling,
-        )
     }
 }
 

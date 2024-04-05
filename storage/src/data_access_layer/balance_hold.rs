@@ -1,10 +1,52 @@
 use crate::{data_access_layer::BalanceIdentifier, tracking_copy::TrackingCopyError};
 use casper_types::{
-    execution::Effects, system::mint::BalanceHoldAddrTag, BlockTime, Digest, HoldsEpoch,
-    ProtocolVersion, U512,
+    account::AccountHash, execution::Effects, system::mint::BalanceHoldAddrTag, BlockTime, Digest,
+    HoldsEpoch, ProtocolVersion, U512,
 };
 use std::fmt::{Display, Formatter};
 use thiserror::Error;
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
+pub enum BalanceHoldKind {
+    #[default]
+    All,
+    Tag(BalanceHoldAddrTag),
+}
+
+impl BalanceHoldKind {
+    /// Returns true of imputed tag applies to instance.
+    pub fn matches(&self, balance_hold_addr_tag: BalanceHoldAddrTag) -> bool {
+        match self {
+            BalanceHoldKind::All => true,
+            BalanceHoldKind::Tag(tag) => tag == &balance_hold_addr_tag,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BalanceHoldMode {
+    Hold {
+        identifier: BalanceIdentifier,
+        hold_amount: U512,
+        holds_epoch: HoldsEpoch,
+        insufficient_handling: InsufficientBalanceHandling,
+    },
+    Clear {
+        identifier: BalanceIdentifier,
+        holds_epoch: HoldsEpoch,
+    },
+}
+
+impl Default for BalanceHoldMode {
+    fn default() -> Self {
+        BalanceHoldMode::Hold {
+            insufficient_handling: InsufficientBalanceHandling::HoldRemaining,
+            hold_amount: U512::zero(),
+            identifier: BalanceIdentifier::Account(AccountHash::default()),
+            holds_epoch: HoldsEpoch::default(),
+        }
+    }
+}
 
 /// How to handle available balance is less than hold amount?
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
@@ -20,36 +62,85 @@ pub enum InsufficientBalanceHandling {
 pub struct BalanceHoldRequest {
     state_hash: Digest,
     protocol_version: ProtocolVersion,
-    identifier: BalanceIdentifier,
-    hold_kind: BalanceHoldAddrTag,
-    hold_amount: U512,
     block_time: BlockTime,
-    holds_epoch: HoldsEpoch,
-    insufficient_handling: InsufficientBalanceHandling,
+    hold_kind: BalanceHoldKind,
+    hold_mode: BalanceHoldMode,
 }
 
 impl BalanceHoldRequest {
-    /// Creates a new [`BalanceHoldRequest`].
+    /// Creates a new [`BalanceHoldRequest`] for adding a gas balance hold.
     #[allow(clippy::too_many_arguments)]
-    pub fn new(
+    pub fn new_gas_hold(
         state_hash: Digest,
         protocol_version: ProtocolVersion,
         identifier: BalanceIdentifier,
-        hold_kind: BalanceHoldAddrTag,
         hold_amount: U512,
         block_time: BlockTime,
         holds_epoch: HoldsEpoch,
         insufficient_handling: InsufficientBalanceHandling,
     ) -> Self {
+        let hold_kind = BalanceHoldKind::Tag(BalanceHoldAddrTag::Gas);
+        let hold_mode = BalanceHoldMode::Hold {
+            identifier,
+            hold_amount,
+            holds_epoch,
+            insufficient_handling,
+        };
         BalanceHoldRequest {
             state_hash,
             protocol_version,
-            identifier,
-            hold_kind,
-            hold_amount,
             block_time,
+            hold_kind,
+            hold_mode,
+        }
+    }
+
+    /// Creates a new [`BalanceHoldRequest`] for adding a processing balance hold.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_processing_hold(
+        state_hash: Digest,
+        protocol_version: ProtocolVersion,
+        identifier: BalanceIdentifier,
+        hold_amount: U512,
+        block_time: BlockTime,
+        holds_epoch: HoldsEpoch,
+        insufficient_handling: InsufficientBalanceHandling,
+    ) -> Self {
+        let hold_kind = BalanceHoldKind::Tag(BalanceHoldAddrTag::Processing);
+        let hold_mode = BalanceHoldMode::Hold {
+            identifier,
+            hold_amount,
             holds_epoch,
             insufficient_handling,
+        };
+        BalanceHoldRequest {
+            state_hash,
+            protocol_version,
+            block_time,
+            hold_kind,
+            hold_mode,
+        }
+    }
+
+    /// Creates a new [`BalanceHoldRequest`] for clearing holds.
+    pub fn new_clear(
+        state_hash: Digest,
+        protocol_version: ProtocolVersion,
+        block_time: BlockTime,
+        hold_kind: BalanceHoldKind,
+        identifier: BalanceIdentifier,
+        holds_epoch: HoldsEpoch,
+    ) -> Self {
+        let hold_mode = BalanceHoldMode::Clear {
+            identifier,
+            holds_epoch,
+        };
+        BalanceHoldRequest {
+            state_hash,
+            protocol_version,
+            block_time,
+            hold_kind,
+            hold_mode,
         }
     }
 
@@ -63,34 +154,19 @@ impl BalanceHoldRequest {
         self.protocol_version
     }
 
-    /// Returns the identifier [`BalanceIdentifier`].
-    pub fn identifier(&self) -> &BalanceIdentifier {
-        &self.identifier
-    }
-
-    /// Returns the hold kind.
-    pub fn hold_kind(&self) -> BalanceHoldAddrTag {
-        self.hold_kind
-    }
-
-    /// Returns the hold amount.
-    pub fn hold_amount(&self) -> U512 {
-        self.hold_amount
-    }
-
-    /// Returns the block time.
+    /// Block time.
     pub fn block_time(&self) -> BlockTime {
         self.block_time
     }
 
-    /// Returns the holds epoch.
-    pub fn holds_epoch(&self) -> HoldsEpoch {
-        self.holds_epoch
+    /// Balance hold kind.
+    pub fn balance_hold_kind(&self) -> BalanceHoldKind {
+        self.hold_kind
     }
 
-    /// Returns insufficient balance handling option.
-    pub fn insufficient_handling(&self) -> InsufficientBalanceHandling {
-        self.insufficient_handling
+    /// Balance hold mode.
+    pub fn balance_hold_mode(&self) -> BalanceHoldMode {
+        self.hold_mode.clone()
     }
 }
 
@@ -100,6 +176,7 @@ impl BalanceHoldRequest {
 pub enum BalanceHoldError {
     TrackingCopy(TrackingCopyError),
     InsufficientBalance { remaining_balance: U512 },
+    UnexpectedWildcardVariant, // programmer error
 }
 
 impl Display for BalanceHoldError {
@@ -110,6 +187,12 @@ impl Display for BalanceHoldError {
             }
             BalanceHoldError::InsufficientBalance { remaining_balance } => {
                 write!(f, "InsufficientBalance: {}", remaining_balance)
+            }
+            BalanceHoldError::UnexpectedWildcardVariant => {
+                write!(
+                    f,
+                    "UnexpectedWildcardVariant: unsupported use of BalanceHoldKind::All"
+                )
             }
         }
     }

@@ -34,7 +34,8 @@ pub use addressable_entity::{AddressableEntityRequest, AddressableEntityResult};
 pub use auction::{AuctionMethod, BiddingRequest, BiddingResult};
 pub use balance::{BalanceIdentifier, BalanceRequest, BalanceResult};
 pub use balance_hold::{
-    BalanceHoldError, BalanceHoldRequest, BalanceHoldResult, InsufficientBalanceHandling,
+    BalanceHoldError, BalanceHoldKind, BalanceHoldMode, BalanceHoldRequest, BalanceHoldResult,
+    InsufficientBalanceHandling,
 };
 pub use bids::{BidsRequest, BidsResult};
 pub use block_rewards::{BlockRewardsError, BlockRewardsRequest, BlockRewardsResult};

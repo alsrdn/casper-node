@@ -749,6 +749,10 @@ async fn fee_is_payed_to_proposer_no_refund() {
     let bob_available_balance =
         get_balance(&mut fixture, &bob_public_key, Some(block_height), false);
     let bob_total_balance = get_balance(&mut fixture, &bob_public_key, Some(block_height), true);
+    println!(
+        "bob_available_balance {:?} bob_total_balance {:?}",
+        bob_available_balance, bob_total_balance
+    );
 
     let alice_available_balance =
         get_balance(&mut fixture, &alice_public_key, Some(block_height), false);

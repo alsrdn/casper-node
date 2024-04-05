@@ -228,7 +228,10 @@ impl CommitProvider for ScratchGlobalState {
         for (key, kind) in effects.value().into_iter().map(TransformV2::destructure) {
             let cached_value = self.cache.read().unwrap().get(&key).cloned();
             let instruction = match (cached_value, kind) {
-                (None, TransformKindV2::Write(new_value)) => TransformInstruction::store(new_value),
+                (None, TransformKindV2::Write(new_value)) => {
+                    println!("scratch commit {:?}", new_value);
+                    TransformInstruction::store(new_value)
+                }
                 (None, transform_kind) => {
                     // It might be the case that for `Add*` operations we don't have the previous
                     // value in cache yet.
