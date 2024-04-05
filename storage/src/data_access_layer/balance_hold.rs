@@ -1,4 +1,5 @@
 use crate::{data_access_layer::BalanceIdentifier, tracking_copy::TrackingCopyError};
+use casper_types::system::mint::BalanceHoldAddr;
 use casper_types::{
     account::AccountHash, execution::Effects, system::mint::BalanceHoldAddrTag, BlockTime, Digest,
     HoldsEpoch, ProtocolVersion, U512,
@@ -205,6 +206,8 @@ pub enum BalanceHoldResult {
     RootNotFound,
     /// Balance hold successfully placed.
     Success {
+        /// Hold address.
+        hold_addr: BalanceHoldAddr,
         /// Purse total balance.
         total_balance: Box<U512>,
         /// Purse available balance after hold placed.
@@ -222,6 +225,7 @@ pub enum BalanceHoldResult {
 
 impl BalanceHoldResult {
     pub fn success(
+        hold_addr: BalanceHoldAddr,
         total_balance: U512,
         available_balance: U512,
         hold: U512,
@@ -229,11 +233,20 @@ impl BalanceHoldResult {
         effects: Effects,
     ) -> Self {
         BalanceHoldResult::Success {
+            hold_addr,
             total_balance: Box::new(total_balance),
             available_balance: Box::new(available_balance),
             hold: Box::new(hold),
             held: Box::new(held),
             effects: Box::new(effects),
+        }
+    }
+
+    /// Hold address, if any.
+    pub fn hold_addr(&self) -> Option<BalanceHoldAddr> {
+        match self {
+            BalanceHoldResult::RootNotFound | BalanceHoldResult::Failure(_) => None,
+            BalanceHoldResult::Success { hold_addr, .. } => Some(*hold_addr),
         }
     }
 

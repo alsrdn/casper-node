@@ -151,6 +151,7 @@ impl StateReader<Key, StoredValue> for ScratchGlobalStateView {
                 return Ok(None);
             }
             if let Some(value) = cache.get(key) {
+                println!("scratch read key {}", key);
                 return Ok(Some(value.clone()));
             }
         }
@@ -176,6 +177,7 @@ impl StateReader<Key, StoredValue> for ScratchGlobalStateView {
         &self,
         key: &Key,
     ) -> Result<Option<TrieMerkleProof<Key, StoredValue>>, Self::Error> {
+        println!("scratch read_with_proof {:?}", key);
         if self.cache.read().unwrap().pruned.contains(key) {
             return Ok(None);
         }
@@ -197,6 +199,7 @@ impl StateReader<Key, StoredValue> for ScratchGlobalStateView {
     }
 
     fn keys_with_prefix(&self, prefix: &[u8]) -> Result<Vec<Key>, Self::Error> {
+        println!("scratch keys_with_prefix {:?}", prefix);
         let txn = self.environment.create_read_txn()?;
         let keys_iter = keys_with_prefix::<Key, StoredValue, _, _>(
             &txn,
@@ -217,6 +220,8 @@ impl StateReader<Key, StoredValue> for ScratchGlobalStateView {
             }
         }
         txn.commit()?;
+
+        println!("scratch keys_with_prefix {:?} records", ret.len());
         Ok(ret)
     }
 }
@@ -228,8 +233,17 @@ impl CommitProvider for ScratchGlobalState {
         for (key, kind) in effects.value().into_iter().map(TransformV2::destructure) {
             let cached_value = self.cache.read().unwrap().get(&key).cloned();
             let instruction = match (cached_value, kind) {
+                (_, TransformKindV2::Identity) => {
+                    // effectively a noop.
+                    debug!(
+                        ?state_hash,
+                        ?key,
+                        "scratch commit: attempt to commit a read."
+                    );
+                    continue;
+                }
                 (None, TransformKindV2::Write(new_value)) => {
-                    println!("scratch commit {:?}", new_value);
+                    println!("scratch commit {:?}", key);
                     TransformInstruction::store(new_value)
                 }
                 (None, transform_kind) => {
@@ -283,9 +297,11 @@ impl CommitProvider for ScratchGlobalState {
             let mut cache = self.cache.write().unwrap();
             match instruction {
                 TransformInstruction::Store(value) => {
+                    println!("scratch cache insert_write store {:?} {:?}", key, value);
                     cache.insert_write(key, value);
                 }
                 TransformInstruction::Prune(key) => {
+                    println!("scratch cache insert_write prune {:?}", key);
                     cache.prune(key);
                 }
             }

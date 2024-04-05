@@ -698,6 +698,11 @@ pub trait StateProvider {
 
                 let hold_key = Key::BalanceHold(balance_hold_addr);
                 println!("{:?} hold key {:?}", tag, hold_key);
+                println!(
+                    "{:?} hold key {:?}",
+                    tag,
+                    hold_key.to_bytes().expect("should have bytes")
+                );
                 tc.write(hold_key, StoredValue::CLValue(cl_value));
                 match tc.read(&hold_key) {
                     Ok(Some(StoredValue::CLValue(cl_value))) => {
@@ -732,6 +737,7 @@ pub trait StateProvider {
                 let effects = tc.effects();
                 println!("hold record effects {:?}", effects);
                 BalanceHoldResult::success(
+                    balance_hold_addr,
                     total_balance,
                     available_balance,
                     hold_amount,
@@ -750,13 +756,12 @@ pub trait StateProvider {
                         return BalanceHoldResult::Failure(BalanceHoldError::TrackingCopy(tce))
                     }
                 };
+                let purse_addr = source_purse.addr();
 
                 let bid_kind = request.balance_hold_kind();
                 let tag = BalanceHoldAddrTag::Gas;
                 if bid_kind.matches(tag) {
-                    if let Err(tce) =
-                        tc.clear_expired_balance_holds(source_purse.addr(), tag, holds_epoch)
-                    {
+                    if let Err(tce) = tc.clear_expired_balance_holds(purse_addr, tag, holds_epoch) {
                         return BalanceHoldResult::Failure(BalanceHoldError::TrackingCopy(tce));
                     }
                 }
@@ -764,7 +769,7 @@ pub trait StateProvider {
                 let tag = BalanceHoldAddrTag::Processing;
                 if bid_kind.matches(tag) {
                     if let Err(tce) = tc.clear_expired_balance_holds(
-                        source_purse.addr(),
+                        purse_addr,
                         tag,
                         HoldsEpoch::from_block_time(request.block_time(), TimeDiff::ZERO),
                     ) {
@@ -792,7 +797,20 @@ pub trait StateProvider {
                 };
                 let effects = tc.effects();
 
+                let block_time = request.block_time();
+                let balance_hold_addr = match tag {
+                    BalanceHoldAddrTag::Gas => BalanceHoldAddr::Gas {
+                        purse_addr,
+                        block_time,
+                    },
+                    BalanceHoldAddrTag::Processing => BalanceHoldAddr::Processing {
+                        purse_addr,
+                        block_time,
+                    },
+                };
+
                 BalanceHoldResult::success(
+                    balance_hold_addr,
                     total_balance,
                     available_balance,
                     U512::zero(),

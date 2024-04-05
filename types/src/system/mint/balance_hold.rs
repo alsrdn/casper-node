@@ -174,15 +174,21 @@ impl BalanceHoldAddr {
         }
     }
 
-    /// Returns the common prefix of all holds on the cited purse.
-    pub fn balance_hold_prefix(&self) -> Result<Vec<u8>, Error> {
-        let purse_addr_bytes = self.purse_addr().to_bytes()?;
-        let size = 1 + purse_addr_bytes.len();
-        let mut ret = Vec::with_capacity(size);
-        ret.push(KeyTag::BalanceHold as u8);
-        ret.extend(purse_addr_bytes);
-        Ok(ret)
-    }
+    // /// Returns the common prefix of all holds on the cited purse.
+    // pub fn balance_hold_prefix(&self) -> Result<Vec<u8>, Error> {
+    //     let purse_addr_bytes = self.purse_addr().to_bytes()?;
+    //     let size = 1 + purse_addr_bytes.len();
+    //     let mut ret = Vec::with_capacity(size);
+    //     ret.push(KeyTag::BalanceHold as u8);
+    //     match self {
+    //         BalanceHoldAddr::Gas { .. } => {
+    //             ret.extend(GAS_TAG);
+    //         }
+    //         BalanceHoldAddr::Processing { .. } => ret.extend(PROCESSING_TAG),
+    //     }
+    //     ret.extend(purse_addr_bytes);
+    //     Ok(ret)
+    // }
 
     /// To formatted string.
     pub fn to_formatted_string(&self) -> String {
@@ -206,7 +212,7 @@ impl BalanceHoldAddr {
                 format!(
                     "{}{}{}",
                     // also, put the tag in readable form
-                    base16::encode_lower(&GAS_TAG.to_le_bytes()),
+                    base16::encode_lower(&PROCESSING_TAG.to_le_bytes()),
                     base16::encode_lower(purse_addr),
                     base16::encode_lower(&block_time.value().to_le_bytes())
                 )

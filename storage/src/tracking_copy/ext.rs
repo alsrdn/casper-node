@@ -165,22 +165,25 @@ where
             match holds_epoch.value() {
                 None => Ok(Motes::new(total_balance)),
                 Some(epoch) => {
-                    let tagged_keys = {
-                        let mut ret: Vec<(BalanceHoldAddrTag, Key)> = vec![];
-                        let tag = BalanceHoldAddrTag::Gas;
-                        let gas_prefix = tag.purse_prefix_by_tag(purse_addr)?;
-                        for key in self.keys_with_prefix(&gas_prefix)? {
-                            ret.push((tag, key));
-                        }
-                        let tag = BalanceHoldAddrTag::Processing;
-                        let processing_prefix = tag.purse_prefix_by_tag(purse_addr)?;
-                        for key in self.keys_with_prefix(&processing_prefix)? {
-                            ret.push((tag, key));
-                        }
-                        ret
-                    };
+                    // let tagged_keys = {
+                    //     let mut ret: Vec<(BalanceHoldAddrTag, Key)> = vec![];
+                    //     let tag = BalanceHoldAddrTag::Gas;
+                    //     let gas_prefix = tag.purse_prefix_by_tag(purse_addr)?;
+                    //     for key in self.keys_with_prefix(&gas_prefix)? {
+                    //         ret.push((tag, key));
+                    //     }
+                    //     let tag = BalanceHoldAddrTag::Processing;
+                    //     let processing_prefix = tag.purse_prefix_by_tag(purse_addr)?;
+                    //     for key in self.keys_with_prefix(&processing_prefix)? {
+                    //         ret.push((tag, key));
+                    //     }
+                    //     ret
+                    // };
+
+                    let prefix = vec![KeyTag::BalanceHold as u8];
+                    let tagged_keys = self.keys_with_prefix(&prefix)?;
                     let mut total_holds = U512::zero();
-                    for (_, hold_key) in tagged_keys {
+                    for hold_key in tagged_keys {
                         if let Some(balance_hold_addr) = hold_key.as_balance_hold() {
                             let block_time = balance_hold_addr.block_time();
                             if block_time.value() < epoch {
@@ -215,22 +218,24 @@ where
         purse_addr: URefAddr,
         holds_epoch: HoldsEpoch,
     ) -> Result<BTreeMap<BlockTime, BalanceHoldsWithProof>, Self::Error> {
-        let tagged_keys = {
-            let mut ret: Vec<(BalanceHoldAddrTag, Key)> = vec![];
-            let tag = BalanceHoldAddrTag::Gas;
-            let gas_prefix = tag.purse_prefix_by_tag(purse_addr)?;
-            for key in self.keys_with_prefix(&gas_prefix)? {
-                ret.push((tag, key));
-            }
-            let tag = BalanceHoldAddrTag::Processing;
-            let processing_prefix = tag.purse_prefix_by_tag(purse_addr)?;
-            for key in self.keys_with_prefix(&processing_prefix)? {
-                ret.push((tag, key));
-            }
-            ret
-        };
+        // let tagged_keys = {
+        //     let mut ret: Vec<(BalanceHoldAddrTag, Key)> = vec![];
+        //     let tag = BalanceHoldAddrTag::Gas;
+        //     let gas_prefix = tag.purse_prefix_by_tag(purse_addr)?;
+        //     for key in self.keys_with_prefix(&gas_prefix)? {
+        //         ret.push((tag, key));
+        //     }
+        //     let tag = BalanceHoldAddrTag::Processing;
+        //     let processing_prefix = tag.purse_prefix_by_tag(purse_addr)?;
+        //     for key in self.keys_with_prefix(&processing_prefix)? {
+        //         ret.push((tag, key));
+        //     }
+        //     ret
+        // };
+        let prefix = vec![KeyTag::BalanceHold as u8];
+        let tagged_keys = self.keys_with_prefix(&prefix)?;
         let mut ret: BTreeMap<BlockTime, BalanceHoldsWithProof> = BTreeMap::new();
-        for (tag, hold_key) in tagged_keys {
+        for hold_key in tagged_keys {
             if let Some(balance_hold_addr) = hold_key.as_balance_hold() {
                 let block_time = balance_hold_addr.block_time();
                 if let Some(timestamp) = holds_epoch.value() {
@@ -252,12 +257,12 @@ where
                 match ret.entry(block_time) {
                     Entry::Vacant(entry) => {
                         let mut inner = BTreeMap::new();
-                        inner.insert(tag, (hold_amount, proof));
+                        inner.insert(balance_hold_addr.tag(), (hold_amount, proof));
                         entry.insert(inner);
                     }
                     Entry::Occupied(mut occupied_entry) => {
                         let inner = occupied_entry.get_mut();
-                        match inner.entry(tag) {
+                        match inner.entry(balance_hold_addr.tag()) {
                             Entry::Vacant(entry) => {
                                 entry.insert((hold_amount, proof));
                             }
@@ -280,10 +285,16 @@ where
         tag: BalanceHoldAddrTag,
         holds_epoch: HoldsEpoch,
     ) -> Result<(), Self::Error> {
-        let prefix = tag.purse_prefix_by_tag(purse_addr)?;
+        let prefix = vec![KeyTag::BalanceHold as u8];
+        //let prefix = tag.purse_prefix_by_tag(purse_addr)?;
         let immut: &_ = self;
         let hold_keys = immut.keys_with_prefix(&prefix)?;
-        println!("clear expired {:?} hold count {}", tag, hold_keys.len());
+        println!(
+            "clear expired {:?} hold count {} prefix {:?}",
+            tag,
+            hold_keys.len(),
+            prefix
+        );
         for hold_key in hold_keys {
             if let Some(balance_hold_addr) = hold_key.as_balance_hold() {
                 let hold_block_time = balance_hold_addr.block_time();
