@@ -117,6 +117,8 @@ struct ConfigsOverride {
     pricing_handling_override: Option<PricingHandling>,
     allow_reservations_override: Option<bool>,
     balance_hold_interval_override: Option<TimeDiff>,
+    administrators: Option<BTreeSet<PublicKey>>,
+    chain_name: Option<String>,
 }
 
 impl ConfigsOverride {
@@ -160,6 +162,16 @@ impl ConfigsOverride {
         self.minimum_era_height = minimum_era_height;
         self
     }
+
+    fn with_administrators(mut self, administrators: BTreeSet<PublicKey>) -> Self {
+        self.administrators = Some(administrators);
+        self
+    }
+
+    fn with_chain_name(mut self, chain_name: String) -> Self {
+        self.chain_name = Some(chain_name);
+        self
+    }
 }
 
 impl Default for ConfigsOverride {
@@ -188,6 +200,8 @@ impl Default for ConfigsOverride {
             pricing_handling_override: None,
             allow_reservations_override: None,
             balance_hold_interval_override: None,
+            administrators: None,
+            chain_name: None,
         }
     }
 }
@@ -306,6 +320,8 @@ impl TestFixture {
             pricing_handling_override,
             allow_reservations_override,
             balance_hold_interval_override,
+            administrators,
+            chain_name,
         } = spec_override.unwrap_or_default();
         if era_duration != TimeDiff::from_millis(0) {
             chainspec.core_config.era_duration = era_duration;
@@ -345,6 +361,12 @@ impl TestFixture {
         }
         if let Some(balance_hold_interval) = balance_hold_interval_override {
             chainspec.core_config.balance_hold_interval = balance_hold_interval;
+        }
+        if let Some(administrators) = administrators {
+            chainspec.core_config.administrators = administrators;
+        }
+        if let Some(chain_name) = chain_name {
+            chainspec.network_config.name = chain_name;
         }
 
         let mut fixture = TestFixture {
